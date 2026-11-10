@@ -1,0 +1,27 @@
+name: checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  deterministic:
+    # Documented Linux environment for deterministic headless checks:
+    # Ubuntu runner + pinned Neovim v0.12.6 (supported baseline).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Neovim v0.12.6
+        run: |
+          curl -fsSLO https://github.com/neovim/neovim/releases/download/v0.12.6/nvim-linux-x86_64.tar.gz
+          tar xzf nvim-linux-x86_64.tar.gz
+          echo "$PWD/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+      - name: Install stylua
+        run: |
+          curl -fsSLO https://github.com/JohnnyMorganz/StyLua/releases/latest/download/stylua-linux-x86_64.zip
+          unzip stylua-linux-x86_64.zip -d ~/.local/bin
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Versions
+        run: nvim --version | head -3 && stylua --version
+      - run: make lint
+      - run: make test

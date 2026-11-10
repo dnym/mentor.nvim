@@ -1,0 +1,20 @@
+-- Test entry point. Run with: make test
+--   nvim --headless -u tests/minimal_init.lua -c "luafile tests/run.lua" -c "qa!"
+
+package.path = (vim.uv.cwd() or ".") .. "/?.lua;" .. package.path
+
+-- Ensure plugin commands exist even if plugin/ autoload is skipped.
+require("mentor.commands").register()
+
+io.write("mentor.nvim checks\n")
+io.write("=================\n")
+
+require("tests.unit.config_spec")()
+require("tests.unit.project_spec")()
+require("tests.integration.storage_spec")()
+require("tests.integration.chat_spec")()
+require("tests.integration.transport_spec")()
+
+local H = require("tests.support.harness")
+H.summary()
+require("tests.support.fs").cleanup()
