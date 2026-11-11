@@ -58,8 +58,9 @@ local function collect_lines()
   lines[#lines + 1] = "Active operations: "
     .. (active > 0 and tostring(active) .. " (Ctrl-C safe; :MentorStop cancels)" or "none")
   lines[#lines + 1] = ""
-  lines[#lines + 1] = "Milestone 1 shell: Coach runs against the fake provider when dev.fake_provider is set."
-  lines[#lines + 1] = "Observer, memory, budgets, and the provider loop arrive in later milestones."
+  lines[#lines + 1] = "Current build: Coach runs against the fake provider when dev.fake_provider is set."
+  lines[#lines + 1] = "Safe context policy and read-only investigation tools are in place; the provider"
+  lines[#lines + 1] = "loop, Observer, memory, and budgets arrive in later milestones."
   return lines
 end
 

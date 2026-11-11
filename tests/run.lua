@@ -11,9 +11,13 @@ io.write("=================\n")
 
 require("tests.unit.config_spec")()
 require("tests.unit.project_spec")()
+require("tests.unit.policy_spec")()
+require("tests.unit.sanitize_spec")()
 require("tests.integration.storage_spec")()
 require("tests.integration.chat_spec")()
 require("tests.integration.transport_spec")()
+require("tests.integration.context_spec")()
+require("tests.integration.tools_spec")()
 
 local H = require("tests.support.harness")
 H.summary()

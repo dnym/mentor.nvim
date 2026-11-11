@@ -69,13 +69,76 @@ Project identity rules:
   argv and `--no-optional-locks` (no writes to the repository).
 - Each worktree is a separate project; `--git-common-dir` records the shared
   repository. Nested repositories resolve to their own innermost root and are
-  flagged for traversal exclusion (enforced by tools in Milestone 2).
+  excluded from parent-project traversal (enforced by the access policy).
 - Non-Git projects: explicit `projects.fallback_root`, otherwise the directory
   captured at resolution time. Provisional: "captured at activation" is
   currently anchored at the buffer's directory rather than the instance cwd;
-  revisit with the project-activation model in Milestone 2.
+  revisit with the project-activation model.
 - Resolution tolerates paths not yet on disk (unsaved named buffers) by
   walking to the nearest existing ancestor.
+
+## Access policy and investigation tools
+
+The shared path/access policy (`lua/mentor/policy.lua`) gates every context
+source: live buffers, traversal, searches, Git output, and stored context.
+
+- Authorization is resolved-path containment, never a raw string-prefix
+  check: the candidate is normalized lexically (`.`/`..` collapsed), then
+  its nearest existing ancestor is resolved with `fs_realpath` and must sit
+  inside the project root or a configured external root. Symlinks therefore
+  cannot carry access outside authorized roots; symlink entries themselves
+  are hidden from listings and never followed during traversal.
+- Exclusions compose on top of containment. Built-in credential defaults
+  (`.env`/`.env.*`, private keys, `.git-credentials`, …) are always excluded
+  and cannot be re-allowed; `context.exclusions` globs only add. A path
+  segment named `.git` is always denied to file tools — Git content is
+  reachable only through the constrained Git adapters.
+- Nested repositories are denied from the parent project's policy; they are
+  separate projects with their own scope.
+- Policy generation counter: reloaded configuration bumps it, and tracked
+  context recorded under an older generation verifies as stale.
+
+Tool design (`lua/mentor/tools/`):
+
+- The registry (`tools/init.lua`) validates every request against the
+  tool's parameter schema — unknown parameters are rejected rather than
+  ignored — and never executes model-supplied commands: argv is
+  application-built, fixed. Results are structured; failures come back as
+  `{ok=false, error}` instead of throwing. `ok` also clears when a tool
+  explicitly reports `available=false`, so consumers have one gate.
+- Every returned table is sanitized for secrets on the way out
+  (`sanitize.sanitize_tree`), with redaction findings attached. Detection
+  covers private-key blocks, known credential formats, and a deliberately
+  broad assignment style; best effort, not a guarantee.
+- Work is bounded synchronously (entry counts, file and scan bytes, match
+  counts, per-call wall-clock via `context.max_elapsed_ms`). Async
+  dispatch, operation budgets, and cancellation land with the provider
+  loop; the synchronous tools are the budget's first enforcement points.
+- File/buffer tools prefer loaded buffer content over disk content,
+  including unsaved named buffers that do not exist on disk, and label
+  sources (`source = "buffer"`, `unsaved = true`). Binary files are
+  skipped with an explicit result.
+- Git adapters (`status`, `diff`, `history`) run fixed argv with external
+  diff/textconv and pagers disabled, filter excluded paths from output,
+  and label results as disk/index or history views — never as including
+  unsaved edits.
+- Language adapters degrade explicitly: without a language server they
+  return `available = false` with a reason and a `search_content`
+  alternative; diagnostics carry an honest "freshness unknown" marker.
+  LSP-returned locations are re-checked against the access policy.
+
+Context tracking (`lua/mentor/context.lua`): every operation carries a
+tracker recording the sources it used — buffer `changedtick`, disk
+mtime+size fingerprints, the policy generation, and the recorded Git
+HEAD. `verify()` rechecks all of them before results are published or an
+observation is made; any buffer edit/close, external file change, policy
+reload, or checkout change invalidates recorded work.
+
+Decision kept: the no-worker runtime survives Milestone 2. Traversal and
+search are pure Lua over `fs_scandir`/`readfile` under hard caps (no rg
+dependency), and Git calls are short bounded subprocesses; measured tool
+calls stay well inside the wall-clock budget, so no worker process is
+introduced yet.
 
 ## Chat window scoping
 
@@ -87,13 +150,15 @@ its buffer is valid.
 
 ## Module status
 
-Landed: `config`, `health`, `commands`, `project`, `storage/*`,
-`provider/{init,fake,transport}`, `ui/{chat,status}`, `plugin/mentor.lua`.
+Landed: `config`, `health`, `commands`, `project`, `policy`, `sanitize`,
+`context`, `storage/*`, `provider/{init,fake,transport}`, `tools/{init,
+files,git,lang}`, `ui/{chat,status}`, `plugin/mentor.lua`.
 
 Not yet created (deliberate: modules are created when a milestone needs
-them): `policy`, `sanitize`, `context`, `snapshots`, `scheduler`, `budget`,
-`agent`, `tools/*`, `modes/*`, `prompts/*`, `memory/*`, `ui/{observations,diff,memory}`.
+them): `snapshots`, `scheduler`, `budget`, `agent`, `modes/*`,
+`prompts/*`, `memory/*`, `ui/{observations,diff,memory}`.
 
-Known provisional gaps: Coach conversations are not yet persisted (M3),
-one-interactive-operation enforcement is per-chat-buffer (scheduler in M3),
-and exclusion/secret policy ships with M2.
+Known provisional gaps: Coach conversations are not yet persisted (next
+milestone), one-interactive-operation enforcement is per-chat-buffer
+(scheduler arrives with the provider loop), and the tools run
+synchronously under internal caps until async dispatch lands.

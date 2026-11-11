@@ -16,7 +16,7 @@ local function chat_name(identity)
 end
 
 local HEADER = {
-  "# Mentor Coach (Milestone 1 shell)",
+  "# Mentor Coach (offline shell; provider loop pending)",
   "# Edit a line starting with '> ', press <CR> on it to send; :MentorChatAsk <text> also works.",
   "# :MentorStop cancels a running request. Responses stream below.",
   "",

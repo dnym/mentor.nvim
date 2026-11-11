@@ -5,9 +5,10 @@ INTRODUCTION                                                      *mentor.nvim*
 
 Mentor.nvim balances observation, coaching, and explicitly requested
 implementation. It is autonomous in understanding a project and deliberately
-restrained in modifying it. This build is the Milestone 1 shell: Coach chat
-with a fake offline provider, project identity, and local storage. Observer
-and Implement arrive in later milestones.
+restrained in modifying it. This build provides Coach chat with a fake
+offline provider, project identity, local storage, a shared access policy,
+and read-only investigation tools (files/buffers, Git state, diagnostics).
+Observer and Implement arrive in later milestones.
 
 Setup: >lua
 
@@ -43,11 +44,41 @@ COMMANDS                                                        *mentor-commands
 CONFIGURATION                                                *mentor-config*
 
 See README.md for the current reference. Shipped defaults for limits,
-notification cadence, and observation timing are validated at setup(); invalid
-values produce named, actionable errors.
+notification cadence, context sizes, and observation timing are validated at
+setup(); invalid values produce named, actionable errors.
+
+context.exclusions       Additional glob patterns excluded from every
+                         context source (buffers, traversal, searches, Git
+                         output). Built-in credential defaults (.env,
+                         .env.*, private keys, .git-credentials, ...) are
+                         always excluded and cannot be re-allowed here.
+projects.external_dirs   Roots beyond the project root that file tools may
+                         read. Empty by default.
 
 Local data lives in stdpath("data")/mentor; credentials are read from the
 environment at request time and are never stored.
+
+==============================================================================
+CONTEXT AND PRIVACY                                        *mentor-privacy*
+
+Investigation tools are read-only and fixed: the model chooses among them
+but never controls commands, flags, or shells. Access is decided by
+resolved-path containment — a path must resolve (following symlinks) to
+inside the project root or a configured external directory. The .git
+directory, nested repositories (separate projects), and credential-style
+files are never reachable through file tools; Git information comes only
+from constrained status/diff/history adapters, labeled as disk/index views
+so unsaved edits are never implied.
+
+File tools prefer live buffer content over disk content, so unsaved (even
+never-saved) named buffers are visible to investigation, and their content
+is tracked: later buffer edits, external file changes, configuration
+changes, or a checkout change invalidate recorded work.
+
+Detected secrets (private-key blocks, known credential formats,
+credential-style assignments) in any tool result are redacted before the
+result is returned, logged, or stored. Detection is best effort; exclusions
+remain the primary protection. Tests use only synthetic secrets.
 
 ==============================================================================
  vim:tw=78:ts=8:ft=help:norl:

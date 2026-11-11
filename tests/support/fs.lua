@@ -27,6 +27,21 @@ function M.git(cwd, args)
   return vim.trim(out.stdout or "")
 end
 
+---Stages everything and commits with a fixed identity.
+function M.commit(dir, message)
+  M.git(dir, { "add", "-A" })
+  M.git(dir, {
+    "-c",
+    "user.name=Test",
+    "-c",
+    "user.email=test@example.invalid",
+    "commit",
+    "-q",
+    "-m",
+    message,
+  })
+end
+
 ---Creates a throwaway git repository with one commit.
 function M.git_repo(dir)
   vim.fn.mkdir(dir, "p")

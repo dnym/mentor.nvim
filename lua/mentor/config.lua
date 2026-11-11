@@ -103,6 +103,22 @@ function M.defaults()
       notify_min_gap_ms = 60000, -- at most one unsolicited notification per project per minute
       category_snooze_ms = 1800000, -- thirty minutes
     },
+    context = {
+      -- Additional exclusion patterns applied to every context source
+      -- (buffers, traversal, searches, Git output). Patterns match a path
+      -- segment or a path and may use * (within a segment), ** (across
+      -- segments) and ?. Built-in credential defaults (.env, private keys,
+      -- ...) are always excluded and cannot be re-allowed here.
+      exclusions = {},
+      max_file_bytes = 262144, -- files larger than this are not read
+      max_output_bytes = 16384, -- per-result text cap returned by tools
+      max_list_entries = 2000, -- entries returned per traversal call
+      max_search_files = 500, -- files visited per content search
+      max_scan_bytes = 4194304, -- total bytes read per content search
+      max_matches = 200, -- matches returned per search call
+      max_elapsed_ms = 5000, -- wall-clock bound per tool call
+      git_history_limit = 20, -- commits returned by default from history
+    },
   }
 end
 
@@ -207,6 +223,20 @@ local function validate(cfg)
       "a non-negative integer of milliseconds"
     )
   end
+
+  check(errors, "context.exclusions", cfg.context.exclusions, is_str_array, "a list of glob patterns")
+  for _, key in ipairs({
+    "max_file_bytes",
+    "max_output_bytes",
+    "max_list_entries",
+    "max_search_files",
+    "max_scan_bytes",
+    "max_matches",
+    "max_elapsed_ms",
+    "git_history_limit",
+  }) do
+    check(errors, "context." .. key, cfg.context[key], is_pos_int, "a positive integer")
+  end
   return errors
 end
 
@@ -229,6 +259,11 @@ function M.load(opts)
   -- explicitly passes nil.
   load_errors = validate(merged)
   loaded = merged
+  -- Policy decisions and tracked context depend on configuration; notify the
+  -- access policy so operations can detect policy changes.
+  pcall(function()
+    require("mentor.policy").bump()
+  end)
   return merged, load_errors
 end
 
