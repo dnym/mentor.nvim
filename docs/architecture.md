@@ -138,6 +138,13 @@ the filesystem). Both share one registry and one contract:
   application-built, fixed. Results are structured; failures come back as
   `{ok=false, error}` instead of throwing. `ok` also clears when a tool
   explicitly reports `available=false`, so consumers have one gate.
+- Error text is returned to the model verbatim, so accidental refusals
+  (missing path, wrong kind, oversized file) name an executable remedy:
+  another tool, or — above `max_file_bytes` — a bounded `from_line` plus
+  `to_line` range, whose slice is streamed without ever reading the
+  whole file. Security refusals (excluded credentials, `.git`, nested
+  repositories) deliberately carry no remedy: correct behavior must not
+  come with a hint toward working around it.
 - Every returned table is sanitized for secrets on the way out
   (`sanitize.sanitize_tree`), with redaction findings attached. Detection
   covers private-key blocks, known credential formats, and a deliberately

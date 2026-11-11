@@ -45,8 +45,9 @@ local function fake_transport()
     T.requests[#T.requests + 1] = entry
     return h
   end
-  ---Settle request n with an exit code after optionally feeding chunks.
-  function T.settle(n, chunks, exit_code)
+  ---Settle request n with an exit kind after optionally feeding chunks;
+  ---curl_code is the numeric exit code the real transport would attach.
+  function T.settle(n, chunks, exit_code, curl_code)
     local entry = T.requests[n]
     for _, chunk in ipairs(chunks or {}) do
       entry.req.on_delta(chunk)
@@ -54,7 +55,7 @@ local function fake_transport()
     entry.settled = true
     T.finished = T.finished + 1
     entry.handle.active = false
-    entry.req.on_exit(exit_code, exit_code)
+    entry.req.on_exit(exit_code, curl_code)
   end
   return T
 end
@@ -178,6 +179,48 @@ return function()
       })
       transport.settle(2, { '{"error":{"type":"server_error","message":"busy"}}' }, "http_error")
       H.eq(done2.err, "http_error", "server errors stay transient-class")
+    end)
+  end)
+
+  H.test("transport failures name the likely cause", function()
+    with_transport(function(transport)
+      local done
+      openai.chat({
+        settings = base_settings(),
+        messages = { { role = "user", content = "go" } },
+        on_done = function(err, info)
+          done = { err = err, info = info }
+        end,
+      })
+      transport.settle(1, {}, "transport_error", 7)
+      H.eq(done.err, "transport_error", "connection failure keeps its transient class")
+      H.contains_text(done.info.message, "refused the connection", "cause named")
+      H.contains_text(done.info.message, "provider.endpoint", "config pointed at")
+
+      local done2
+      openai.chat({
+        settings = base_settings(),
+        messages = { { role = "user", content = "go" } },
+        on_done = function(err, info)
+          done2 = { err = err, info = info }
+        end,
+      })
+      transport.settle(2, {}, "timeout")
+      H.eq(done2.err, "timeout", "timeout class preserved")
+      H.contains_text(done2.info.message, "timed out", "plain-language timeout")
+      H.contains_text(done2.info.message, "provider.timeout_s", "remedy offered")
+
+      local done3
+      openai.chat({
+        settings = base_settings(),
+        messages = { { role = "user", content = "go" } },
+        on_done = function(err, info)
+          done3 = { err = err, info = info }
+        end,
+      })
+      transport.settle(3, {}, "transport_error", 92)
+      H.contains_text(done3.info.message, "curl exit 92", "unknown codes report the code")
+      H.contains_text(done3.info.message, "checkhealth", "diagnostics pointed at")
     end)
   end)
 

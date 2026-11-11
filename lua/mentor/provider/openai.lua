@@ -44,6 +44,33 @@ local function provider_error_message(body)
   return "the provider returned an error response"
 end
 
+---An actionable message for curl-level transport failures. The exit code is
+---curl's; the common ones name the likely cause and where to look.
+---@param kind string "timeout" | "transport_error" | other class
+---@param exit_code integer|string|nil curl exit code
+---@param settings table provider settings
+---@return string
+local function transport_failure_message(kind, exit_code, settings)
+  if kind == "timeout" then
+    return string.format(
+      "the provider request timed out after %d s (raise provider.timeout_s, or check the endpoint)",
+      math.floor(settings.timeout_s or 0)
+    )
+  end
+  if exit_code == 6 then
+    return "the endpoint host could not be resolved (check provider.endpoint: " .. settings.endpoint .. ")"
+  end
+  if exit_code == 7 then
+    return "the endpoint refused the connection (is the provider server running? check provider.endpoint: "
+      .. settings.endpoint
+      .. ")"
+  end
+  if exit_code == 28 then
+    return "the endpoint transfer exceeded its time limit"
+  end
+  return string.format("transport failure (curl exit %s); run :checkhealth mentor", tostring(exit_code))
+end
+
 ---@class mentor.ToolCall
 ---@field id string
 ---@field name string
@@ -331,7 +358,7 @@ function M.chat(req)
         body = body,
         timeout_s = settings.timeout_s,
         on_delta = feed,
-        on_exit = function(code, _)
+        on_exit = function(kind, exit_code)
           if overflow then
             deliver("response_too_large", {
               message = string.format(
@@ -343,18 +370,18 @@ function M.chat(req)
             return
           end
           local collected = table.concat(raw)
-          if code == "cancelled" then
+          if kind == "cancelled" then
             deliver("cancelled")
-          elseif code == "http_error" then
+          elseif kind == "http_error" then
             -- --fail-with-body delivers the provider's error body on stdout.
-            local message, kind = provider_error_message(collected)
-            if kind == "invalid_request_error" then
+            local message, pkind = provider_error_message(collected)
+            if pkind == "invalid_request_error" then
               deliver("request_rejected", { message = "provider rejected the request: " .. message })
             else
               deliver("http_error", { message = "provider error: " .. message })
             end
-          elseif code ~= nil then
-            deliver(code, { message = "transport failed: " .. code })
+          elseif kind ~= nil then
+            deliver(kind, { message = transport_failure_message(kind, exit_code, settings) })
           elseif streaming then
             if #state.problems > 0 then
               deliver("malformed_response", {
