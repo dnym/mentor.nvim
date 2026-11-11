@@ -17,7 +17,7 @@ local function git_run(ctx, subcmd)
     return { available = false, reason = "the project is not a Git repository" }
   end
   ctx.tracker:record_checkout()
-  local argv = { "git", "--no-pager", "-C", ctx.project.root, "--no-optional-locks" }
+  local argv = { "git", "--no-pager", "--literal-pathspecs", "-C", ctx.project.root, "--no-optional-locks" }
   vim.list_extend(argv, GIT_FLAGS)
   vim.list_extend(argv, subcmd)
   local budget = math.min(ctx.limits.max_elapsed_ms + 3000, 15000)
@@ -77,27 +77,54 @@ end
 ---@param ctx table
 ---@param args table {path?, staged?}
 function M.diff(ctx, args)
-  local subcmd = { "diff", "--no-ext-diff", "--no-textconv", "--unified=3" }
+  local subcmd = { "diff", "--no-ext-diff", "--no-textconv", "--no-renames" }
   if args.staged then
     subcmd[#subcmd + 1] = "--cached"
   end
+  local pathspec
   if args.path then
     local access, why = ctx.policy:authorize(args.path)
     if not access then
       return { error = why }
     end
-    subcmd[#subcmd + 1] = "--"
-    subcmd[#subcmd + 1] = access.rel
+    pathspec = access.rel ~= "" and access.rel or nil
   end
-  local run = git_run(ctx, subcmd)
+  local names_cmd = vim.list_extend(vim.deepcopy(subcmd), { "--name-only", "-z" })
+  if pathspec then
+    vim.list_extend(names_cmd, { "--", pathspec })
+  end
+  local run = git_run(ctx, names_cmd)
   if not run.stdout then
     return run
   end
-  local out, truncated = cap(run.stdout, ctx.limits.max_output_bytes)
+  local parts, bytes, truncated = {}, 0, false
+  for _, path in ipairs(vim.split(run.stdout, "\0", { plain = true, trimempty = true })) do
+    local access = ctx.policy:authorize(path)
+    if access then
+      local file_cmd = { "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=3" }
+      if args.staged then
+        file_cmd[#file_cmd + 1] = "--cached"
+      end
+      vim.list_extend(file_cmd, { "--", path })
+      local file = git_run(ctx, file_cmd)
+      if not file.stdout then
+        return file
+      end
+      ctx.provenance = ctx.provenance or {}
+      ctx.provenance[#ctx.provenance + 1] = access.abspath
+      parts[#parts + 1] = file.stdout
+      bytes = bytes + #file.stdout
+      if bytes > ctx.limits.max_output_bytes then
+        truncated = true
+        break
+      end
+    end
+  end
+  local out, capped = cap(table.concat(parts), ctx.limits.max_output_bytes)
   return {
     view = "disk/index (unsaved buffer edits are not included)",
     diff = out,
-    truncated = truncated,
+    truncated = truncated or capped,
   }
 end
 

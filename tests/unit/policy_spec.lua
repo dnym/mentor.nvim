@@ -34,10 +34,16 @@ return function()
 
   H.test("user exclusions add patterns but cannot re-allow defaults", function()
     local _, proj = fresh_repo("excl2")
-    config.load({ context = { exclusions = { "build", "**/generated/**" } } })
+    config.load({ context = { exclusions = { "build", "**/generated/**", "src/private" } } })
     local policy = policy_mod.for_project(proj)
     -- user patterns apply
-    for _, path in ipairs({ "build/output.js", "src/build/cache.txt", "x/generated/y.lua", "generated/z.lua" }) do
+    for _, path in ipairs({
+      "build/output.js",
+      "src/build/cache.txt",
+      "x/generated/y.lua",
+      "generated/z.lua",
+      "src/private/note.txt",
+    }) do
       local access = policy:authorize(path)
       H.ok(access == nil, path .. " excluded by user pattern")
     end

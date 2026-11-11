@@ -7,6 +7,30 @@ local fs = require("tests.support.fs")
 local transport = require("mentor.provider.transport")
 
 return function()
+  H.test("queued response chunks arrive before a fast process exit", function()
+    local saved = vim.system
+    local events = {}
+    vim.system = function(_, opts, on_exit)
+      opts.stdout(nil, "last chunk")
+      on_exit({ code = 0 })
+      return { kill = function() end }
+    end
+    local handle = transport.request({
+      url = "file:///dev/null",
+      on_delta = function(chunk)
+        events[#events + 1] = chunk
+      end,
+      on_exit = function()
+        events[#events + 1] = "exit"
+      end,
+    })
+    vim.system = saved
+    H.ok(handle, "request started")
+    vim.wait(1000, function()
+      return #events == 2
+    end, 5)
+    H.eq(table.concat(events, ","), "last chunk,exit", "chunk delivered before exit")
+  end)
   H.test("missing transport executable produces an actionable error", function()
     local saved = transport.executable
     transport.executable = "mentor-curl-definitely-missing"

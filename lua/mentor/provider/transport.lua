@@ -112,7 +112,7 @@ function M.request(req)
       if req.on_delta then
         local chunk = data
         vim.schedule(function()
-          if not handle.cancelled and not done and req.on_delta then
+          if not handle.cancelled and req.on_delta then
             req.on_delta(chunk)
           end
         end)

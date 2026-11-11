@@ -129,8 +129,14 @@ function Policy:excluded(rel)
           return true
         end
       end
-    elseif rel:match(entry.pattern) then
-      return true
+    else
+      local prefix = ""
+      for segment in rel:gmatch("[^/]+") do
+        prefix = prefix == "" and segment or (prefix .. "/" .. segment)
+        if prefix:match(entry.pattern) then
+          return true
+        end
+      end
     end
   end
   return false

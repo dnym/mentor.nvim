@@ -21,6 +21,7 @@ local tools_mod = require("mentor.tools")
 local policy_mod = require("mentor.policy")
 local records = require("mentor.storage.records")
 local memory_mod = require("mentor.memory")
+local provenance = require("mentor.provenance")
 
 local M = {}
 
@@ -186,18 +187,15 @@ function M.run(opts)
     local pol = policy_mod.for_project(opts.project)
     for _, m in ipairs(messages) do
       if m.role == "tool" and not m.withheld then
-        if m.source ~= nil then
-          local _, why = pol:authorize(m.source)
-          if why then
-            m.content = "[result withheld: its source is excluded by the current access policy]"
-            m.withheld = true
-          end
-        elseif m.tool and m.tool:find("^memory_") then
-          -- Memory results embed multiple entries; withhold per entry whose
-          -- provenance became excluded rather than replaying the bundle.
+        if m.tool and m.tool:find("^memory_") then
           local rewritten, changed = memory_mod.reauthorize_result(m.content, opts.project)
           if changed then
             m.content = rewritten
+          end
+        elseif tools_mod.group_of(m.tool) == "investigation" or not m.tool then
+          if not provenance.authorized(m.source, m.tool, pol) then
+            m.content = provenance.withheld
+            m.withheld = true
           end
         end
       end
@@ -304,6 +302,7 @@ function M.run(opts)
         if opts.on_tool then
           opts.on_tool("start", call, nil)
         end
+        tool_ctx.provenance = {}
         local result = tools_mod.run(tool_ctx, call.name, call.arguments)
         local serialized = vim.json.encode(result)
         if #serialized > limits.tool_result_bytes then
@@ -314,7 +313,10 @@ function M.run(opts)
           serialized = truncate_result(serialized, math.max(0, remaining))
         end
         tool_bytes_total = tool_bytes_total + #serialized
-        local source = type(call.arguments) == "table" and call.arguments.path or nil
+        local source
+        if tools_mod.group_of(call.name) == "investigation" then
+          source = provenance.capture(tool_ctx, call.arguments or {}, result)
+        end
         messages[#messages + 1] = {
           role = "tool",
           tool_call_id = call.id,

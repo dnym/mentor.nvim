@@ -17,6 +17,7 @@ local function project_buffers(ctx)
       vim.fn.bufloaded(buf) == 1
       and vim.api.nvim_buf_get_name(buf) ~= ""
       and ctx.tracker:same_project(buf)
+      and ctx.policy:authorize(vim.api.nvim_buf_get_name(buf))
     then
       out[#out + 1] = buf
     end

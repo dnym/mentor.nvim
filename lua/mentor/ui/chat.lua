@@ -85,7 +85,7 @@ local function render_row(row, tool_names)
   if row.role == "tool" then
     local name = row.tool or tool_names[row.tool_call_id] or "tool"
     local note = "⌁ " .. name .. " result"
-    if row.source then
+    if row.source and row.source:sub(1, 13) ~= "mentor-paths:" then
       note = note .. " (" .. row.source .. ")"
     end
     return { note }
