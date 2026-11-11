@@ -1,9 +1,11 @@
--- Read-only investigation tool registry. The model (or an internal caller)
--- selects a tool name, a parameter object, and nothing else: every request
--- is validated against the tool's schema (SEC: independent of model
--- instructions), executed under the shared access policy with wall-clock and
--- output budgets, sanitized for secrets, and returned as structured data.
--- No tool writes project files or executes model-supplied commands.
+-- Read-mostly tool registry. The model (or an internal caller) selects a
+-- tool name, a parameter object, and nothing else: every request is validated
+-- against the tool's schema (independent of model instructions), executed
+-- under the shared access policy with wall-clock and output budgets,
+-- sanitized for secrets, and returned as structured data. No tool writes
+-- project files or executes model-supplied commands; the memory tools write
+-- only inside designated memory storage, under revision control and user
+-- precedence rules.
 
 local config = require("mentor.config")
 local context = require("mentor.context")
@@ -13,6 +15,7 @@ local sanitize = require("mentor.sanitize")
 local files = require("mentor.tools.files")
 local gitmod = require("mentor.tools.git")
 local lang = require("mentor.tools.lang")
+local memorytools = require("mentor.tools.memory")
 
 local M = {}
 
@@ -77,6 +80,48 @@ M.tools = {
     summary = "Recent commits (messages and changed paths, filtered by policy)",
     params = { path = "string?", limit = "integer?" },
     handler = gitmod.history,
+  },
+  memory_list = {
+    summary = "List persistent memory entries visible to this project (global + project scope)",
+    params = { scope = "string?", include_deleted = "boolean?" },
+    handler = memorytools.list,
+  },
+  memory_search = {
+    summary = "Search persistent memory; entries with now-excluded sources are withheld",
+    params = { query = "string" },
+    handler = memorytools.search,
+  },
+  memory_remember = {
+    summary = "Create a memory entry (project knowledge or general developer guidance preferences)",
+    params = {
+      scope = "string",
+      summary = "string",
+      content = "string?",
+      category = "string?",
+      uncertainty = "string?",
+      refs = "string?",
+      key = "string?",
+    },
+    handler = memorytools.remember,
+  },
+  memory_update = {
+    summary = "Revise a memory entry at the revision you last saw; user-protected entries refuse",
+    params = {
+      entry_id = "integer",
+      expected_revision = "integer",
+      summary = "string?",
+      content = "string?",
+      category = "string?",
+      uncertainty = "string?",
+      refs = "string?",
+      reason = "string?",
+    },
+    handler = memorytools.update,
+  },
+  memory_delete = {
+    summary = "Delete a memory entry (reversible; user deletions suppress automatic recreation)",
+    params = { entry_id = "integer", expected_revision = "integer", reason = "string?" },
+    handler = memorytools.delete,
   },
 }
 

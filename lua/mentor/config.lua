@@ -102,6 +102,17 @@ function M.defaults()
       -- first to this estimated token budget.
       history_max_tokens = 8000,
     },
+    memory = {
+      -- Entries injected into a model request (global + current project,
+      -- provenance-authorized) and returned by memory searches.
+      recall_limit = 12,
+      -- Byte cap on the memory block appended to the system context.
+      recall_max_bytes = 4096,
+      -- Candidate entries considered per manual consolidation pass.
+      consolidate_max_entries = 60,
+      -- Entries rendered in the :MentorMemory view (newest first).
+      view_max_entries = 300,
+    },
     observer = {
       edit_idle_ms = 2000,
       save_debounce_ms = 1000,
@@ -216,6 +227,10 @@ local function validate(cfg)
   end
 
   check(errors, "chat.history_max_tokens", cfg.chat.history_max_tokens, is_pos_int, "a positive integer")
+
+  for _, key in ipairs({ "recall_limit", "recall_max_bytes", "consolidate_max_entries", "view_max_entries" }) do
+    check(errors, "memory." .. key, cfg.memory[key], is_pos_int, "a positive integer")
+  end
 
   for _, key in ipairs({
     "edit_idle_ms",

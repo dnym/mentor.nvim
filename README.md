@@ -3,16 +3,20 @@
 Learning-oriented AI assistance for Neovim: autonomous in understanding code,
 deliberately restrained in writing it.
 
-**Status: Milestone 3 — Coach with a real provider loop.** Project
+**Status: Milestone 4 — Persistent memory with user control.** Project
 identity, local SQLite storage, an async transport, an interactive Coach
 conversation driven end to end against any OpenAI-compatible provider
-(streaming responses, native read-only tool use, per-operation budgets,
-cancellation, automatic queuing against single-request endpoints), a shared
-access policy (path containment, exclusions, secret sanitization), and a
-read-only investigation tool set (files/buffers, Git, diagnostics) are in
-place. Coach transcripts persist locally and resume across restarts.
-Automatic observation, persistent memory, and the Implement workflow arrive
-in later milestones.
+(streaming responses, native tool use, per-operation budgets, cancellation,
+automatic queuing against single-request endpoints), a shared access policy
+(path containment, exclusions, secret sanitization), read-only investigation
+tools (files/buffers, Git, diagnostics), and shared memory the assistant
+manages under strict user precedence are in place. Memory entries keep
+revisions and provenance, are inspectable and editable as generated
+Markdown (`:MentorMemory`), support revert, reversible deletion, permanent
+erasure, and protection, and are re-authorized against the current access
+policy before every request. Coach transcripts persist locally and resume
+across restarts. Automatic observation and the Implement workflow arrive in
+later milestones.
 
 Requires Neovim **v0.12.6+** on Arch/Arch-based systems (other Linux systems
 best effort).
@@ -83,6 +87,12 @@ require("mentor").setup({
   chat = {
     history_max_tokens = 8000, -- conversation history trimmed oldest-first
   },
+  memory = {
+    recall_limit = 12,          -- entries injected into a request / searched
+    recall_max_bytes = 4096,    -- byte cap on the injected memory block
+    consolidate_max_entries = 60, -- candidates considered per manual pass
+    view_max_entries = 300,     -- entries rendered in :MentorMemory
+  },
   dev = { fake_provider = false }, -- offline placeholder provider for UI work
 })
 ```
@@ -97,13 +107,39 @@ named, actionable errors.
 |---|---|
 | `:MentorChat` | Open the Coach conversation for the current project |
 | `:MentorChatAsk {question}` | Ask Coach immediately |
+| `:MentorChatClear` | Clear the Coach transcript for the current project (memory is untouched) |
 | `:MentorStop` | Cancel running operations |
-| `:MentorStatus` | Configuration, providers, storage, activity |
+| `:MentorStatus` | Configuration, providers, storage, activity, memory totals |
+| `:MentorMemory` | Open the memory view (generated Markdown) for the current project |
+| `:MentorMemory revert <id> [rev]` | Re-apply an entry's older revision (defaults to the previous one) |
+| `:MentorMemory delete <id>` | Reversible deletion (a tombstone suppresses automatic recreation) |
+| `:MentorMemory erase <id>` | Permanent erasure of the entry and its history (chat is untouched) |
+| `:MentorMemory protect <id> on\|off` | Release or re-apply user precedence over an entry |
+| `:MentorMemory consolidate` | Run one bounded merge pass over redundant entries |
 
 In the Coach buffer, edit a line starting with `> ` and press `<CR>` to send.
 Requests made while one is running queue automatically and run in order;
 `:MentorStop` cancels the running request (queued ones keep their place).
 No global keymaps are imposed.
+
+## Memory
+
+The assistant records durable knowledge as entries in two scopes: *global*
+(general goals, explanation preferences) and *project* (architecture,
+decisions, conventions). Every entry keeps its revision history, origin,
+evidence references, and an uncertainty marker — the assistant's guesses
+about you stay marked as hypotheses unless you said them yourself.
+
+`:MentorMemory` opens a generated Markdown view: edit an entry's summary or
+content and save to commit, add a `## [new]` block to create, remove a
+block to delete. Saves validate against the revisions the view was rendered
+at (another Neovim instance writing first produces an explicit conflict,
+never a silent merge), commit everything in one transaction, and regenerate
+the view. Your edits mark entries protected: the assistant cannot replace
+protected entries — at most it records a separate entry for you to
+reconcile. Erasure removes the entry and all its history, keeping only a
+content-free audit marker; the Coach transcript is cleared separately with
+`:MentorChatClear`.
 
 ## Development
 
@@ -138,7 +174,17 @@ decisions and [CONTRIBUTING.md](CONTRIBUTING.md) for conventions.
   part of Git results).
 - Coach conversations are stored locally (sanitized) and only ever sent
   back to your configured provider; history is trimmed to a bounded token
-  budget.
+  budget. Clearing them (`:MentorChatClear`) is a separate action from
+  memory erasure, and memory erasure never touches conversation material.
+- Memory writes go through a dedicated tool interface confined to memory
+  storage: the model cannot write files with it, entries are sanitized for
+  detected secrets before storage, and project knowledge stays in project
+  scope (global entries must not carry paths or project-identifying
+  details). What the assistant infers about you stays marked as a
+  hypothesis until you state it or verify it.
+- Memory entries carry provenance; entries sourced from a path that later
+  becomes excluded are withheld from retrieval and from replayed tool
+  results instead of being retransmitted.
 - Stored tool results are re-authorized against the current access policy
   before every model request: a file excluded after the fact is withheld
   from later requests even if it was read earlier in the same conversation.

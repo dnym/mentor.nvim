@@ -8,7 +8,8 @@
 -- reaching the provider and is only released while it is known that nothing
 -- was dispatched. Stored tool results are re-authorized against the current
 -- access policy before every dispatch, so a policy change that excludes a
--- source mid-operation stops transmitting that result.
+-- source mid-operation stops transmitting that result; memory tool results
+-- recheck each embedded entry's provenance the same way.
 --
 -- Error handling: one automatic retry per operation for transient failures
 -- (transport, timeout, provider 5xx/429-class errors); deterministic
@@ -19,6 +20,7 @@ local config = require("mentor.config")
 local tools_mod = require("mentor.tools")
 local policy_mod = require("mentor.policy")
 local records = require("mentor.storage.records")
+local memory_mod = require("mentor.memory")
 
 local M = {}
 
@@ -113,8 +115,9 @@ function M.run(opts)
     git_common_dir = opts.project.git_common_dir,
   })
 
-  -- Working copy: internal messages carry provenance (source) that must not
-  -- be serialized to the provider; content may be withheld per message.
+  -- Working copy: internal messages carry provenance (source) and the
+  -- producing tool name that must not be serialized to the provider;
+  -- content may be withheld per message.
   local messages = {}
   for i, m in ipairs(opts.messages) do
     messages[i] = {
@@ -123,6 +126,7 @@ function M.run(opts)
       tool_calls = m.tool_calls,
       tool_call_id = m.tool_call_id,
       source = m.source,
+      tool = m.tool,
     }
   end
 
@@ -176,11 +180,20 @@ function M.run(opts)
   local function recheck_stored_context()
     local pol = policy_mod.for_project(opts.project)
     for _, m in ipairs(messages) do
-      if m.role == "tool" and m.source ~= nil and not m.withheld then
-        local _, why = pol:authorize(m.source)
-        if why then
-          m.content = "[result withheld: its source is excluded by the current access policy]"
-          m.withheld = true
+      if m.role == "tool" and not m.withheld then
+        if m.source ~= nil then
+          local _, why = pol:authorize(m.source)
+          if why then
+            m.content = "[result withheld: its source is excluded by the current access policy]"
+            m.withheld = true
+          end
+        elseif m.tool and m.tool:find("^memory_") then
+          -- Memory results embed multiple entries; withhold per entry whose
+          -- provenance became excluded rather than replaying the bundle.
+          local rewritten, changed = memory_mod.reauthorize_result(m.content, opts.project)
+          if changed then
+            m.content = rewritten
+          end
         end
       end
     end
@@ -302,6 +315,7 @@ function M.run(opts)
           tool_call_id = call.id,
           content = serialized,
           source = source,
+          tool = call.name,
         }
         if opts.on_message then
           opts.on_message({
@@ -309,6 +323,7 @@ function M.run(opts)
             content = serialized,
             tool_call_id = call.id,
             source = source,
+            tool = call.name,
           })
         end
         if opts.on_tool then

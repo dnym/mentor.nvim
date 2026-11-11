@@ -35,16 +35,26 @@ written against the 0.12 shape.
 ## Storage
 
 - One SQLite database: `stdpath("data")/mentor/mentor.db` (XDG local data).
-  Generated Markdown views and disposable caches will live in the same tree,
-  never inside project repositories.
+  Disposable caches live in the same tree; generated views (memory, status)
+  stay editor buffers and are never written into project repositories.
 - `journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout=5000`.
 - Migrations: ordered `lua/mentor/storage/migrations/NNN_*.sql` applied inside
   explicit transactions, tracked by `PRAGMA user_version`. Migration files are
   discovered by globbing runtime paths: `nvim_get_runtime_file` returned a
   stale match set for files added after startup on the tested build.
 - Conversations (migration 002): one linear Coach transcript per
-  (project, mode), stored sanitized; tool messages carry provenance so a
-  later policy change can withhold them.
+  (project, mode), stored sanitized; tool messages carry provenance and
+  their producing tool name so a later policy change can withhold them.
+  Transcripts are cleared only through their own explicit path
+  (`:MentorChatClear`).
+- Memory (migration 003): `memory_entry` (global or project scope, stable
+  slug key, category, uncertainty, JSON provenance refs, status with
+  tombstones, protected flag, optimistic-concurrency revision),
+  `memory_revision` (a full snapshot per revision: the inspectable history
+  that powers revert), and `memory_audit` (content-free markers for
+  erasure and protection changes). Uniqueness of (scope, project, key) is
+  enforced in the repository layer because SQL UNIQUE treats the NULL
+  project id of global rows as distinct.
 - Usage accounting: a model request first writes an atomic
   `usage_reservation`; it becomes conservatively retained once the request
   actually starts reaching the provider, and folds into daily totals with
@@ -55,7 +65,8 @@ written against the 0.12 shape.
   (`lua/mentor/storage/records.lua`); no arbitrary query construction from
   feature code, and all FFI binding is positional (trailing nils bind NULL).
 - Multi-instance use is supported by WAL plus explicit `BEGIN IMMEDIATE`
-  transactions; revision checks arrive with the memory milestone.
+  transactions; memory mutations are guarded by expected-revision checks,
+  so a stale write from another instance is refused rather than merged.
 
 ## Transport
 
@@ -116,7 +127,10 @@ source: live buffers, traversal, searches, Git output, and stored context.
 - Policy generation counter: reloaded configuration bumps it, and tracked
   context recorded under an older generation verifies as stale.
 
-Tool design (`lua/mentor/tools/`):
+Tool design (`lua/mentor/tools/`): the investigation tools are read-only;
+the five `memory_*` tools are the model's only write path, and they are
+confined to designated memory storage (they call the memory module, never
+the filesystem). Both share one registry and one contract:
 
 - The registry (`tools/init.lua`) validates every request against the
   tool's parameter schema — unknown parameters are rejected rather than
@@ -202,6 +216,62 @@ Coach UI (`lua/mentor/ui/chat.lua`):
   sanitized; a request in flight plus a FIFO queue keep the interaction
   responsive without refusing follow-ups.
 
+## Memory and user control (Milestone 4)
+
+Three layers, one authority:
+
+- `storage/records.lua` moves rows (entries, revision snapshots, audit
+  markers) through scoped parameterized methods only.
+- `memory/init.lua` is the single policy-bearing API: revision guards,
+  protection rules, deletion suppression, sanitization on write, and
+  provenance rechecks. Everything returns structured
+  `{ok, ...}/{ok=false, error}` results; nothing throws at call sites.
+- Model-facing tools (`tools/memory.lua`) and user-facing surfaces
+  (`ui/memory.lua`, `ui/memory_commands.lua`) both go through that API —
+  the model's writes are strictly confined to memory storage (MEM write
+  tools cannot touch files), and both paths share the same guards.
+
+Decisions:
+
+- Optimistic concurrency: every mutation carries the revision the writer
+  last saw; a stale write (typically another Neovim instance) is refused
+  with an actionable message, never merged silently. The memory view's
+  save path validates every piece first and commits updates, creations,
+  and deletions in one `BEGIN IMMEDIATE` transaction, so a refused piece
+  rolls the whole batch back.
+- User precedence: any user write marks the entry protected; protected
+  entries (and user tombstones) are immune to agent update/delete — the
+  tools refuse and tell the model to record a separate entry with its
+  evidence instead of overriding the user.
+- Deletion is reversible: normal deletes keep a tombstone whose
+  (scope, project, key) suppresses automatic agent recreation; revert
+  re-applies any history snapshot as a new revision. Permanent erasure
+  removes the entry and every revision snapshot, leaving only a
+  content-free audit marker. Conversation material is independent and is
+  cleared only through its own explicit command.
+- Provenance is rechecked, not trusted: entries carry refs (paths and
+  bare concepts). A ref counts as path-like only if it looks like a path;
+  path-like refs must still be authorized by the current policy, and one
+  newly excluded path ref conservatively omits the whole entry (mixed
+  sources cannot be separated safely). The same recheck runs over
+  serialized `memory_*` tool results embedded in stored history before
+  every dispatch and before replaying a persisted transcript — rewriting
+  them in place, idempotently via a `withheld` marker.
+- Sanitization on write: detected secrets are redacted before entries are
+  stored (recorded as redaction findings, not as a rejection) — the
+  stored entry stays useful minus the credential.
+- The memory view (`mentor://memory/...`, `buftype=acwrite`) is a
+  generated Markdown rendering, never a file on disk: SQLite stays the
+  only authoritative store, so interrupted generation always recovers by
+  reopening. Saving diffs the buffer against the render-time snapshot,
+  and a conflict keeps the user's proposed text in the buffer untouched.
+- Consolidation is a bounded agent pass (background budgets, only the
+  five memory tools) over deterministically grouped candidates
+  (same category plus ref/token overlap); protected entries and
+  tombstones are excluded from candidates and refused by the tools
+  regardless. It is manual (`:MentorMemory consolidate`) by design:
+  automatic scheduling waits for the observation-activation machinery.
+
 ## Chat window scoping
 
 Plugin windows retain their originating project binding
@@ -214,15 +284,18 @@ its buffer is valid.
 
 Landed: `config`, `health`, `commands`, `project`, `policy`, `sanitize`,
 `context`, `storage/*`, `provider/{init,fake,transport,sse,openai}`,
-`scheduler`, `agent`, `prompts/init`, `tools/{init,files,git,lang}`,
-`ui/{chat,status}`, `plugin/mentor.lua`.
+`scheduler`, `agent`, `prompts/init`, `tools/{init,files,git,lang,memory}`,
+`memory/{init,consolidate}`, `ui/{chat,status,memory,memory_commands}`,
+`plugin/mentor.lua`.
 
 Not yet created (deliberate: modules are created when a milestone needs
-them): `snapshots`, `budget`, `modes/*`, `memory/*`, `ui/{observations,
-diff,memory}`.
+them): `snapshots`, `budget`, `modes/*`, `observer/*`, `ui/{observations,
+diff}`.
 
 Known provisional gaps: the tools run synchronously under internal caps
 until async dispatch proves necessary (measured live roundtrips stay well
-inside budgets); Coach keeps one linear conversation per project (threaded
-conversations and memory arrive with the memory milestone); one-interactive-
-operation enforcement is process-global.
+inside budgets); Coach keeps one linear conversation per project
+(threaded conversations remain open); memory relevance is rule-based
+(scope, refs, recency) until semantic indexing lands; consolidation is
+manual until observation activation provides its scheduling gate;
+one-interactive-operation enforcement is process-global.

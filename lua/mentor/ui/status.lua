@@ -53,7 +53,7 @@ local function collect_lines()
     lines[#lines + 1] = "Storage: sqlite3 unavailable via FFI - run :checkhealth mentor"
   end
 
-  local active = chat.active_count()
+  local active = chat.active_count() + require("mentor.memory.consolidate").active_count()
   lines[#lines + 1] = "Active operations: "
     .. (active > 0 and tostring(active) .. " (Ctrl-C safe; :MentorStop cancels)" or "none")
   local queued = chat.queued_count()
@@ -71,11 +71,21 @@ local function collect_lines()
       .. totals.est_tokens
       .. " est tokens"
       .. (totals.open_reservations > 0 and (" (" .. totals.open_reservations .. " in flight)") or "")
+    local memory_mod = require("mentor.memory")
+    local mc = memory_mod.counts(proj)
+    lines[#lines + 1] = "Memory: "
+      .. mc.global
+      .. " global, "
+      .. mc.project
+      .. " project entries"
+      .. (mc.protected > 0 and (" (" .. mc.protected .. " user-protected)") or "")
+      .. (mc.deleted > 0 and ("; " .. mc.deleted .. " deleted (reversible)") or "")
+      .. " — :MentorMemory"
   end
   lines[#lines + 1] = ""
   lines[#lines + 1] = "Coach runs the bounded tool-calling loop against the configured provider"
   lines[#lines + 1] = "(or the offline fake provider when dev.fake_provider is set)."
-  lines[#lines + 1] = "Observer and shared memory arrive in later milestones."
+  lines[#lines + 1] = "Automatic observation arrives in a later milestone."
   return lines
 end
 

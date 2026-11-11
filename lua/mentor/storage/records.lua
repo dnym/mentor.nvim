@@ -52,6 +52,7 @@ M.conversations = conversations
 ---@field tool_calls string[]|table[]|nil assistant messages: OpenAI tool calls
 ---@field tool_call_id string|nil tool messages: call this result answers
 ---@field source string|nil tool messages: provenance path of the result
+---@field tool string|nil tool messages: producing tool name (recheck by kind)
 
 ---@param project_id integer
 ---@param mode string
@@ -63,8 +64,8 @@ function conversations.append(project_id, mode, msg)
     tool_calls = type(msg.tool_calls) == "string" and msg.tool_calls or vim.json.encode(msg.tool_calls)
   end
   local _, id = storage.execute(
-    "INSERT INTO chat_message (project_id, mode, role, content, tool_calls, tool_call_id, source, created_at)"
-      .. " VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+    "INSERT INTO chat_message (project_id, mode, role, content, tool_calls, tool_call_id, source, tool, created_at)"
+      .. " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
     {
       project_id,
       mode,
@@ -73,6 +74,7 @@ function conversations.append(project_id, mode, msg)
       tool_calls,
       msg.tool_call_id,
       msg.source,
+      msg.tool,
       math.floor(vim.uv.now()),
     }
   )
@@ -85,7 +87,7 @@ end
 ---@param limit integer|nil
 ---@return mentor.ChatMessage[] rows with id and created_at included
 function conversations.load(project_id, mode, limit)
-  local sql = "SELECT id, role, content, tool_calls, tool_call_id, source, created_at"
+  local sql = "SELECT id, role, content, tool_calls, tool_call_id, source, tool, created_at"
     .. " FROM chat_message WHERE project_id = ? AND mode = ?"
   if limit then
     sql = sql .. " ORDER BY id DESC LIMIT ?;"
@@ -112,6 +114,299 @@ function conversations.count(project_id, mode)
     project_id,
     mode,
   }) or 0
+end
+
+---Explicit clearing of a conversation (memory erasure does NOT do this:
+---chat material is independently retained and cleared separately).
+---@param project_id integer
+---@param mode string
+---@return integer removed
+function conversations.delete_all(project_id, mode)
+  return storage.execute("DELETE FROM chat_message WHERE project_id = ? AND mode = ?;", { project_id, mode })
+    or 0
+end
+
+-- Persistent memory. Entries are global or project-scoped; every change
+-- appends a snapshot to the revision history. These methods only move rows;
+-- policy (protection, revision conflicts, sanitization, deletion
+-- suppression) lives in the memory module above them.
+local memory = {}
+M.memory = memory
+
+---@class mentor.MemoryInsert
+---@field scope "global"|"project"
+---@field project_id integer|nil
+---@field entry_key string
+---@field category string
+---@field summary string
+---@field content string
+---@field uncertainty "established"|"hypothesis"
+---@field refs string|table|nil JSON string or list
+---@field protected boolean|nil
+---@field author "user"|"agent"
+
+local function encode_refs(refs)
+  if refs == nil then
+    return nil
+  end
+  return type(refs) == "string" and refs or vim.json.encode(refs)
+end
+
+---@param e mentor.MemoryInsert
+---@return integer entry id
+function memory.insert(e)
+  local now = math.floor(vim.uv.now())
+  local _, id = storage.execute(
+    "INSERT INTO memory_entry (scope, project_id, entry_key, category, summary, content, uncertainty, refs,"
+      .. " status, protected, revision, author, created_at, updated_at)"
+      .. " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, 1, ?, ?, ?);",
+    {
+      e.scope,
+      e.project_id,
+      e.entry_key,
+      e.category,
+      e.summary,
+      e.content or "",
+      e.uncertainty or "established",
+      encode_refs(e.refs),
+      e.protected and 1 or 0,
+      e.author,
+      now,
+      now,
+    }
+  )
+  memory.append_revision(id, 1, e, e.author, "created")
+  return id
+end
+
+---History snapshot for one revision of an entry (or entry-like table).
+---@param entry_id integer
+---@param revision integer
+---@param snap table fields: category, summary, content, uncertainty, refs
+---@param author string
+---@param reason string|nil
+function memory.append_revision(entry_id, revision, snap, author, reason)
+  storage.execute(
+    "INSERT INTO memory_revision (entry_id, revision, category, summary, content, uncertainty, refs, author,"
+      .. " reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
+    {
+      entry_id,
+      revision,
+      snap.category,
+      snap.summary,
+      snap.content or "",
+      snap.uncertainty or "established",
+      encode_refs(snap.refs),
+      author,
+      reason,
+      math.floor(vim.uv.now()),
+    }
+  )
+end
+
+---@param id integer
+---@return table|nil row
+function memory.get(id)
+  return storage.query("SELECT * FROM memory_entry WHERE id = ?;", { id })[1]
+end
+
+---@param scope string
+---@param project_id integer|nil
+---@param entry_key string
+---@return table|nil row
+function memory.find_by_key(scope, project_id, entry_key)
+  if project_id == nil then
+    return storage.query(
+      "SELECT * FROM memory_entry WHERE scope = ? AND project_id IS NULL AND entry_key = ?;",
+      { scope }
+    )[1]
+  end
+  return storage.query(
+    "SELECT * FROM memory_entry WHERE scope = ? AND project_id = ? AND entry_key = ?;",
+    { scope, project_id, entry_key }
+  )[1]
+end
+
+---Content-changing update guarded by the expected revision (optimistic
+---concurrency across Neovim instances). Returns 0 on a stale write.
+---@param id integer
+---@param expected_revision integer
+---@param snap table category, summary, content, uncertainty, refs
+---@param author string
+---@param reason string|nil
+---@param opts table|nil { status = "active"|"deleted", protected = boolean|nil (keep when nil) }
+---@return integer affected (0 = revision conflict)
+function memory.update(id, expected_revision, snap, author, reason, opts)
+  opts = opts or {}
+  local status = opts.status or "active"
+  local head = "UPDATE memory_entry SET category = ?, summary = ?, content = ?, uncertainty = ?, refs = ?,"
+  local tail =
+    " status = ?, author = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?;"
+  local sql, params
+  if opts.protected == nil then
+    sql = head .. " " .. tail
+    params =
+      { snap.category, snap.summary, snap.content or "", snap.uncertainty, encode_refs(snap.refs), status }
+  else
+    sql = head .. " protected = ?, " .. tail
+    params = {
+      snap.category,
+      snap.summary,
+      snap.content or "",
+      snap.uncertainty,
+      encode_refs(snap.refs),
+      opts.protected and 1 or 0,
+      status,
+    }
+  end
+  local now = math.floor(vim.uv.now())
+  params[#params + 1] = author
+  params[#params + 1] = now
+  params[#params + 1] = id
+  params[#params + 1] = expected_revision
+  return storage.execute(sql, params) or 0
+end
+
+---@param id integer
+---@param protected boolean
+---@return integer affected
+function memory.set_protected(id, protected)
+  return storage.execute("UPDATE memory_entry SET protected = ? WHERE id = ?;", { protected and 1 or 0, id })
+    or 0
+end
+
+---@param id integer
+---@return integer affected
+function memory.touch_updated(id)
+  return storage.execute(
+    "UPDATE memory_entry SET updated_at = ? WHERE id = ?;",
+    { math.floor(vim.uv.now()), id }
+  ) or 0
+end
+
+---@param entry_id integer
+---@return table[] newest-first revision snapshots
+function memory.list_revisions(entry_id)
+  return storage.query(
+    "SELECT revision, category, summary, content, uncertainty, refs, author, reason, created_at"
+      .. " FROM memory_revision WHERE entry_id = ? ORDER BY revision DESC;",
+    { entry_id }
+  )
+end
+
+---@param entry_id integer
+---@param revision integer
+---@return table|nil
+function memory.get_revision(entry_id, revision)
+  return storage.query(
+    "SELECT revision, category, summary, content, uncertainty, refs, author, reason, created_at"
+      .. " FROM memory_revision WHERE entry_id = ? AND revision = ?;",
+    { entry_id, revision }
+  )[1]
+end
+
+---Active entries visible to one project: global plus that project's own.
+---Never returns other projects' entries.
+---@param project_id integer
+---@param limit integer|nil
+---@return table[] rows
+function memory.visible(project_id, limit)
+  local sql = "SELECT * FROM memory_entry WHERE status = 'active'"
+    .. " AND (scope = 'global' OR (scope = 'project' AND project_id = ?)) ORDER BY updated_at DESC"
+  local params = { project_id }
+  if limit then
+    sql = sql .. " LIMIT ?;"
+    params[#params + 1] = limit
+  else
+    sql = sql .. ";"
+  end
+  return storage.query(sql, params)
+end
+
+---@param scope "global"|"project"|"all"
+---@param project_id integer|nil
+---@param status "active"|"deleted"|"all"|nil defaults to active
+---@return table[] rows newest-first
+function memory.list(scope, project_id, status)
+  status = status or "active"
+  local where, params = {}, {}
+  if scope == "global" then
+    where[#where + 1] = "scope = 'global'"
+  elseif scope == "project" then
+    where[#where + 1] = "scope = 'project' AND project_id = ?"
+    params[#params + 1] = project_id
+  else
+    -- "all" always means one project's horizon: its own entries plus global
+    -- ones, never another project's entries.
+    where[#where + 1] = "(scope = 'global' OR (scope = 'project' AND project_id = ?))"
+    params[#params + 1] = project_id
+  end
+  if status == "active" or status == "deleted" then
+    where[#where + 1] = "status = ?"
+    params[#params + 1] = status
+  end
+  local sql = "SELECT * FROM memory_entry"
+  if #where > 0 then
+    sql = sql .. " WHERE " .. table.concat(where, " AND ")
+  end
+  return storage.query(sql .. " ORDER BY updated_at DESC;", params)
+end
+
+---Erasure: removes the entry and every revision snapshot; keeps only a
+---content-free audit marker (and clears nothing else: chat material is
+---cleared through its own explicit path).
+---@param id integer
+function memory.erase(id)
+  local row = memory.get(id)
+  if not row then
+    return
+  end
+  storage.transaction(function()
+    storage.execute("DELETE FROM memory_revision WHERE entry_id = ?;", { id })
+    storage.execute("DELETE FROM memory_entry WHERE id = ?;", { id })
+    storage.execute(
+      "INSERT INTO memory_audit (entry_id, scope, project_id, entry_key, action, created_at)"
+        .. " VALUES (?, ?, ?, ?, 'erased', ?);",
+      { id, row.scope, row.project_id, row.entry_key, math.floor(vim.uv.now()) }
+    )
+  end)
+end
+
+---@param entry_id integer
+---@param action string
+function memory.audit(entry_id, action)
+  local row = memory.get(entry_id)
+  if not row then
+    return
+  end
+  storage.execute(
+    "INSERT INTO memory_audit (entry_id, scope, project_id, entry_key, action, created_at) VALUES (?, ?, ?, ?, ?, ?);",
+    { entry_id, row.scope, row.project_id, row.entry_key, action, math.floor(vim.uv.now()) }
+  )
+end
+
+---@param project_id integer
+---@return table { global, project, protected, deleted } counts
+function memory.counts(project_id)
+  return {
+    global = storage.scalar(
+      "SELECT COUNT(*) FROM memory_entry WHERE scope = 'global' AND status = 'active';"
+    ) or 0,
+    project = storage.scalar(
+      "SELECT COUNT(*) FROM memory_entry WHERE scope = 'project' AND project_id = ? AND status = 'active';",
+      { project_id }
+    ) or 0,
+    protected = storage.scalar(
+      "SELECT COUNT(*) FROM memory_entry WHERE protected = 1 AND (scope = 'global' OR project_id = ?)"
+        .. " AND status = 'active';",
+      { project_id }
+    ) or 0,
+    deleted = storage.scalar(
+      "SELECT COUNT(*) FROM memory_entry WHERE status = 'deleted'"
+        .. " AND (scope = 'global' OR (scope = 'project' AND project_id = ?));",
+      { project_id }
+    ) or 0,
+  }
 end
 
 -- Usage accounting. A model request first reserves budget atomically; the

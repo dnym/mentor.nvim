@@ -7,11 +7,12 @@ Mentor.nvim balances observation, coaching, and explicitly requested
 implementation. It is autonomous in understanding a project and deliberately
 restrained in modifying it. This build provides an interactive Coach that
 runs a bounded tool-calling loop against any OpenAI-compatible provider
-(streaming, native read-only tools, budgets, cancellation, request queuing),
-with conversations persisted locally per project, plus project identity,
-local storage, a shared access policy, and read-only investigation tools
-(files/buffers, Git state, diagnostics). Observer and Implement arrive in
-later milestones.
+(streaming, native tools, budgets, cancellation, request queuing), with
+conversations persisted locally per project, plus project identity, local
+storage, a shared access policy, read-only investigation tools
+(files/buffers, Git state, diagnostics), and shared persistent memory the
+assistant manages under strict user control (revisions, protection,
+revert, erasure). Observer and Implement arrive in later milestones.
 
 Setup: >lua
 
@@ -40,12 +41,46 @@ COMMANDS                                                        *mentor-commands
                             is running queue automatically and run in
                             order.
 
+:MentorChatClear            Clear the stored Coach transcript for the
+                            current project. Memory is not affected;
+                            memory erasure likewise never touches the
+                            transcript.
+
 :MentorStop                 Cancel running operations. Late results from a
                             cancelled operation are never applied. Queued
                             requests keep their place.
 
 :MentorStatus               Show configuration, providers, project, storage,
-                            usage totals, and active operations.
+                            usage totals, memory totals, and active
+                            operations.
+
+:MentorMemory [args]        Without arguments, open the memory view: a
+                            generated Markdown rendering (never a disk file)
+                            of global and project memory entries. Edit an
+                            entry's summary (first body line), content, or
+                            trailing "Refs:" line and save (:w) to commit;
+                            add a "## [new]" block to create an entry;
+                            remove a whole block to delete one. Saves
+                            validate against the revisions the view was
+                            rendered at and commit in one transaction; a
+                            conflicting change made elsewhere refuses the
+                            whole save and keeps your proposed text in the
+                            buffer. Your edits protect the entry: the
+                            assistant cannot replace protected entries.
+  :MentorMemory revert <id> [rev]
+                            Re-apply an older revision as a new revision
+                            (default: the previous one). Works for
+                            undoing any change, including a deletion.
+  :MentorMemory delete <id> Reversible deletion. The tombstone suppresses
+                            automatic recreation of that entry.
+  :MentorMemory erase <id>  Permanent removal of the entry and all of its
+                            history, leaving only a content-free audit
+                            marker. The Coach transcript is untouched.
+  :MentorMemory protect <id> on|off
+                            Re-apply or release user precedence over an
+                            entry.
+  :MentorMemory consolidate Run one bounded pass merging redundant
+                            unprotected entries in this project.
 
 ==============================================================================
 CONFIGURATION                                                *mentor-config*
@@ -66,6 +101,16 @@ providers.default.*      endpoint, model, api_key_env, timeout_s,
                          models), capabilities = { tools, streaming }.
 chat.history_max_tokens  Conversation history sent with each request is
                          trimmed oldest-first to this estimated budget.
+memory.recall_limit      Entries injected into a model request (global +
+                         current project, provenance-authorized) and
+                         returned by memory searches.
+memory.recall_max_bytes  Byte cap on the memory block appended to the
+                         system context.
+memory.consolidate_max_entries
+                         Candidate entries considered per manual
+                         :MentorMemory consolidate pass.
+memory.view_max_entries  Entries rendered in the :MentorMemory view
+                         (newest first).
 
 Local data lives in stdpath("data")/mentor; credentials are read from the
 environment at request time and are never stored.
@@ -95,10 +140,21 @@ remain the primary protection. Tests use only synthetic secrets.
 Stored tool results carry their provenance and are re-authorized against
 the current access policy before every model request: results from a path
 that became excluded are withheld from later requests, never silently
-replayed. Coach transcripts are stored locally, sanitized, and only sent
-back to the configured provider. Each model request reserves its budget
-atomically before dispatch; limits (requests, tool calls, estimated tokens,
-wall-clock) are enforced up front and interrupted work stays accounted for.
+replayed. The same recheck applies per entry inside stored memory tool
+results, and to memory retrieved for a request: an entry whose referenced
+path is now excluded is omitted rather than retransmitted.
+
+Memory writes use a dedicated tool interface confined to memory storage;
+the model has no file-writing tool. Stored entries are sanitized for
+detected secrets, keep full revision history, mark inferences about the
+developer as hypotheses, and refuse agent changes to entries the user
+edited or protected. Deletion is reversible and suppresses automatic
+recreation; only explicit erasure removes content, leaving content-free
+audit metadata. Coach transcripts are stored locally, sanitized, and only
+sent back to the configured provider; clearing them is a separate,
+explicit action. Each model request reserves its budget atomically before
+dispatch; limits (requests, tool calls, estimated tokens, wall-clock) are
+enforced up front and interrupted work stays accounted for.
 
 ==============================================================================
  vim:tw=78:ts=8:ft=help:norl:

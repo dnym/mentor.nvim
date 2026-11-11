@@ -11,6 +11,7 @@ local config = require("mentor.config")
 local records = require("mentor.storage.records")
 local sanitize = require("mentor.sanitize")
 local prompts = require("mentor.prompts")
+local memory_mod = require("mentor.memory")
 
 local M = {}
 
@@ -81,7 +82,7 @@ local function render_row(row, tool_names)
     return out
   end
   if row.role == "tool" then
-    local name = tool_names[row.tool_call_id] or "tool"
+    local name = row.tool or tool_names[row.tool_call_id] or "tool"
     local note = "⌁ " .. name .. " result"
     if row.source then
       note = note .. " (" .. row.source .. ")"
@@ -92,10 +93,12 @@ local function render_row(row, tool_names)
 end
 
 ---Rebuild provider-format history from persisted rows, repairing any turn
----that was interrupted before its tool results were stored.
+---that was interrupted before its tool results were stored, and
+---re-authorizing persisted memory results against the current policy.
 ---@param rows table[]
+---@param proj mentor.Project
 ---@return table[]
-local function replay_messages(rows)
+local function replay_messages(rows, proj)
   local out = {}
   for _, row in ipairs(rows) do
     if row.role == "user" then
@@ -117,11 +120,16 @@ local function replay_messages(rows)
       end
       out[#out + 1] = m
     elseif row.role == "tool" then
+      local content = row.content
+      if row.tool and row.tool:find("^memory_") then
+        content = memory_mod.reauthorize_result(content, proj)
+      end
       out[#out + 1] = {
         role = "tool",
         tool_call_id = row.tool_call_id,
-        content = row.content,
+        content = content,
         source = row.source,
+        tool = row.tool,
       }
     end
   end
@@ -345,8 +353,13 @@ local function pump_queue()
 
   local row_id = project_row_id(proj)
   local rows = records.conversations.load(row_id, "coach")
-  local history = replay_messages(rows)
-  local messages = build_request_messages(prompts.coach_system(proj), history)
+  local history = replay_messages(rows, proj)
+  local system = prompts.coach_system(proj)
+  local mem_block = memory_mod.render_context(proj)
+  if mem_block ~= "" then
+    system = system .. "\n\n" .. mem_block
+  end
+  local messages = build_request_messages(system, history)
 
   local function note(text)
     insert_note(buf, op, text)
@@ -495,6 +508,32 @@ function M.stop()
     end
   end
   return n
+end
+
+---Explicitly clears the stored Coach transcript for a project (independent
+---of memory erasure: chat material is cleared only through this path).
+---Cancels operations bound to that project's chat buffer first.
+---@param proj mentor.Project
+---@return integer removed
+function M.clear(proj)
+  local buf = chat_buffers[proj.identity]
+  if buf and vim.api.nvim_buf_is_valid(buf) then
+    local op = ops[buf]
+    if op then
+      op.cancelled = true
+      if op.handle then
+        op.handle:cancel()
+      end
+      ops[buf] = nil
+    end
+    for i = #ask_queue, 1, -1 do
+      if ask_queue[i].buf == buf then
+        table.remove(ask_queue, i)
+      end
+    end
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, header_lines())
+  end
+  return records.conversations.delete_all(project_row_id(proj), "coach")
 end
 
 ---Active operation count (status display).
