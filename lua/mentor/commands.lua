@@ -31,12 +31,44 @@ function M.register()
   end, { desc = "Ask Coach a question", nargs = "+" })
 
   vim.api.nvim_create_user_command("MentorStop", function()
-    local n = require("mentor.ui.chat").stop() + require("mentor.memory.consolidate").stop()
+    local n = require("mentor.ui.chat").stop()
+      + require("mentor.memory.consolidate").stop()
+      + require("mentor.implement").stop()
     vim.notify(
       n > 0 and ("mentor.nvim: cancelled " .. n .. " operation(s)") or "mentor.nvim: nothing to cancel",
       n > 0 and vim.log.levels.INFO or vim.log.levels.DEBUG
     )
   end, { desc = "Cancel running Mentor operations" })
+
+  vim.api.nvim_create_user_command("MentorImplement", function(opts)
+    local _, err = require("mentor.implement").start(opts.args, {
+      range = opts.range,
+      line1 = opts.line1,
+      line2 = opts.line2,
+      vmode = vim.fn.visualmode(),
+    })
+    if err then
+      notify_error(err)
+    end
+  end, {
+    desc = "Propose a bounded edit for a visual selection or the insertion point (preview, then accept/reject)",
+    nargs = "+",
+    range = true,
+  })
+
+  vim.api.nvim_create_user_command("MentorImplementAccept", function(opts)
+    local _, err = require("mentor.implement").accept(opts.args)
+    if err then
+      notify_error(err)
+    end
+  end, { desc = "Apply the pending Implement proposal (one undo reverts it)", nargs = "?" })
+
+  vim.api.nvim_create_user_command("MentorImplementReject", function(opts)
+    local _, err = require("mentor.implement").reject(opts.args)
+    if err then
+      notify_error(err)
+    end
+  end, { desc = "Reject the pending Implement proposal (the buffer stays untouched)", nargs = "?" })
 
   vim.api.nvim_create_user_command("MentorChatClear", function()
     local proj = require("mentor.project").ensure_current()

@@ -53,12 +53,21 @@ local function collect_lines()
     lines[#lines + 1] = "Storage: sqlite3 unavailable via FFI - run :checkhealth mentor"
   end
 
-  local active = chat.active_count() + require("mentor.memory.consolidate").active_count()
+  local implement_mod = require("mentor.implement")
+  local active = chat.active_count()
+    + require("mentor.memory.consolidate").active_count()
+    + implement_mod.active_count()
   lines[#lines + 1] = "Active operations: "
     .. (active > 0 and tostring(active) .. " (Ctrl-C safe; :MentorStop cancels)" or "none")
   local queued = chat.queued_count()
   if queued > 0 then
     lines[#lines + 1] = "Queued requests: " .. tostring(queued)
+  end
+  local pending = implement_mod.pending_count()
+  if pending > 0 then
+    lines[#lines + 1] = "Implement: "
+      .. pending
+      .. " pending proposal(s) — :MentorImplementAccept / :MentorImplementReject"
   end
 
   local records_mod = require("mentor.storage.records")
@@ -85,6 +94,8 @@ local function collect_lines()
   lines[#lines + 1] = ""
   lines[#lines + 1] = "Coach runs the bounded tool-calling loop against the configured provider"
   lines[#lines + 1] = "(or the offline fake provider when dev.fake_provider is set)."
+  lines[#lines + 1] = "Implement proposes one bounded buffer edit at a time; nothing applies without"
+  lines[#lines + 1] = "an explicit :MentorImplementAccept."
   lines[#lines + 1] = "Automatic observation arrives in a later milestone."
   return lines
 end

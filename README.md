@@ -3,20 +3,21 @@
 Learning-oriented AI assistance for Neovim: autonomous in understanding code,
 deliberately restrained in writing it.
 
-**Status: Milestone 4 — Persistent memory with user control.** Project
-identity, local SQLite storage, an async transport, an interactive Coach
-conversation driven end to end against any OpenAI-compatible provider
+**Status: Milestone 5 — Implement mode: proposals with guarded edits.**
+Project identity, local SQLite storage, an async transport, an interactive
+Coach conversation driven end to end against any OpenAI-compatible provider
 (streaming responses, native tool use, per-operation budgets, cancellation,
 automatic queuing against single-request endpoints), a shared access policy
 (path containment, exclusions, secret sanitization), read-only investigation
 tools (files/buffers, Git, diagnostics), and shared memory the assistant
-manages under strict user precedence are in place. Memory entries keep
-revisions and provenance, are inspectable and editable as generated
-Markdown (`:MentorMemory`), support revert, reversible deletion, permanent
-erasure, and protection, and are re-authorized against the current access
-policy before every request. Coach transcripts persist locally and resume
-across restarts. Automatic observation and the Implement workflow arrive in
-later milestones.
+manages under strict user precedence are in place. Implement mode turns an
+explicitly selected range in one buffer into a previewed, explicitly accepted
+buffer edit (`:MentorImplement`). Memory entries keep revisions and
+provenance, are inspectable and editable as generated Markdown
+(`:MentorMemory`), support revert, reversible deletion, permanent erasure,
+and protection, and are re-authorized against the current access policy
+before every request. Coach transcripts persist locally and resume across
+restarts. Automatic observation arrives in a later milestone.
 
 Requires Neovim **v0.12.6+** on Arch/Arch-based systems (other Linux systems
 best effort).
@@ -87,6 +88,11 @@ require("mentor").setup({
   chat = {
     history_max_tokens = 8000, -- conversation history trimmed oldest-first
   },
+  implement = {
+    context_lines = 30,        -- lines of surrounding context in the diff preview
+    max_target_bytes = 32768,  -- the selected range may not exceed this
+    max_replacement_bytes = 65536, -- larger proposals are refused
+  },
   memory = {
     recall_limit = 12,          -- entries injected into a request / searched
     recall_max_bytes = 4096,    -- byte cap on the injected memory block
@@ -108,8 +114,11 @@ named, actionable errors.
 | `:MentorChat` | Open the Coach conversation for the current project |
 | `:MentorChatAsk {question}` | Ask Coach immediately |
 | `:MentorChatClear` | Clear the Coach transcript for the current project (memory is untouched) |
-| `:MentorStop` | Cancel running operations |
+| `:MentorStop` | Cancel running operations (Coach, consolidation, Implement runs) |
 | `:MentorStatus` | Configuration, providers, storage, activity, memory totals |
+| `:MentorImplement {instruction}` | Propose a bounded edit for a visual selection or the insertion point; opens a diff preview |
+| `:MentorImplementAccept [id]` | Apply the pending proposal (one `u` reverts it) |
+| `:MentorImplementReject [id]` | Reject the pending proposal (the buffer stays untouched) |
 | `:MentorMemory` | Open the memory view (generated Markdown) for the current project |
 | `:MentorMemory revert <id> [rev]` | Re-apply an entry's older revision (defaults to the previous one) |
 | `:MentorMemory delete <id>` | Reversible deletion (a tombstone suppresses automatic recreation) |
@@ -141,6 +150,28 @@ reconcile. Erasure removes the entry and all its history, keeping only a
 content-free audit marker; the Coach transcript is cleared separately with
 `:MentorChatClear`.
 
+## Implement mode
+
+Select a characterwise or linewise range (or place the cursor where text
+should be inserted) and run `:MentorImplement {instruction}`. The target is
+frozen before the model runs: one buffer, one range, that buffer's exact
+version. The model investigates with the same read-only tools Coach uses and
+can only submit replacement text for exactly that range — it cannot pick a
+file, move the target, or request more. Blockwise selections are refused
+with an explanation; whole-file, new-file, and multi-file changes are not
+offered.
+
+Each proposal opens a native diff preview (current vs proposed, with
+surrounding context). Nothing changes until you run
+`:MentorImplementAccept`; at that moment the target is revalidated — buffer
+identity, version, modifiability, and the current access policy. Any
+intervening edit invalidates the proposal, even an edit you later undid, and
+so does closing the buffer. Accepting applies exactly one buffer edit in a
+distinct undo block: one `u` reverts the whole application. The buffer is
+never saved by the plugin and generated code is never executed. Proposals
+live only in memory; `:MentorStop` cancels a run and withdraws its pending
+proposal.
+
 ## Development
 
 ```sh
@@ -165,6 +196,11 @@ decisions and [CONTRIBUTING.md](CONTRIBUTING.md) for conventions.
   commands, flags, or shells. Path arguments are validated against resolved
   containment — symlink escapes and traversal above the project root are
   denied.
+- The only route from the model to your buffers is the Implement workflow:
+  a developer command fixes the target first, the model supplies replacement
+  text for exactly that range, and a separate explicit accept revalidates
+  and applies it. Coach is never even offered the proposal tool, and no tool
+  writes to disk.
 - Credential files (`.env`, private keys, …) and configured exclusions are
   hidden from every context source: buffers, listings, searches, Git output,
   and stored context. Detected secrets in tool results are redacted before

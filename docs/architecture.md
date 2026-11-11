@@ -272,6 +272,49 @@ Decisions:
   regardless. It is manual (`:MentorMemory consolidate`) by design:
   automatic scheduling waits for the observation-activation machinery.
 
+## Implement mode: proposals with guarded edits (Milestone 5)
+
+One command, one frozen target, one tool, one explicit acceptance
+(`lua/mentor/implement/init.lua`):
+
+- The developer command (`:MentorImplement`, `range=true`) captures the
+  target before the model runs: buffer, exact 0-based end-exclusive range,
+  `changedtick`, path, policy verdict. Characterwise visual marks are
+  converted once, multibyte-aware (`'>` sits on the start of the last
+  selected character, so the exclusive end extends past its UTF-8 width);
+  linewise ranges include the materialized EOL mid-buffer but an
+  end-of-buffer range ends at the last line's text (no phantom line);
+  a bare command addresses an insertion point at the (clamped) cursor;
+  blockwise is refused with an explanation. Whole-file, new-file, and
+  multi-file edits are deliberately out of scope.
+- Per-mode tool groups (`tools/init.lua`: `investigation`, `memory`,
+  `implement`) drive explicit allow-lists at each call site. Coach passes
+  `investigation + memory` only, so `propose_edit` is invisible to it —
+  the separation is structural, not prompt-level. Implement runs get all
+  three groups.
+- `propose_edit` takes no path or range parameters (unknown parameters are
+  rejected like any tool), so the model cannot smuggle a new target; it
+  hands replacement text to `implement.intake`, which validates caps,
+  refuses no-op replacements, supersedes the previous pending proposal,
+  and renders a native side-by-side diff preview from generated scratch
+  buffers sharing identical context lines and omission markers.
+- Acceptance revalidates everything against the frozen snapshot: buffer
+  validity and load state, name, `changedtick` (any intervening edit
+  invalidates — even edit-and-undo, because the version, not the text,
+  decides), modifiability, and the current access policy. It then applies
+  exactly one `nvim_buf_set_text` preceded by an `undolevels` re-set,
+  which closes the current undo block (0.12 removed `undotime`), so a
+  single `u` reverts exactly the application. Nothing is written to disk;
+  previews and proposals are in-memory only and die with the session.
+- `:MentorStop` cancels Implement runs and withdraws their pending
+  proposals; status reports active runs and pending proposal counts.
+
+Neovim 0.12 API notes learned here: `nvim_buf_get_text` requires the
+explicit 6th opts argument; API text calls reject `end_row == line_count`,
+which is why end-of-buffer linewise ranges end at the last line's text;
+`'undotime'` no longer exists — re-setting `'undolevels'` (even to the same
+value) closes the current undo block.
+
 ## Chat window scoping
 
 Plugin windows retain their originating project binding
@@ -284,13 +327,12 @@ its buffer is valid.
 
 Landed: `config`, `health`, `commands`, `project`, `policy`, `sanitize`,
 `context`, `storage/*`, `provider/{init,fake,transport,sse,openai}`,
-`scheduler`, `agent`, `prompts/init`, `tools/{init,files,git,lang,memory}`,
-`memory/{init,consolidate}`, `ui/{chat,status,memory,memory_commands}`,
-`plugin/mentor.lua`.
+`scheduler`, `agent`, `prompts/init`, `tools/{init,files,git,lang,memory,
+implement}`, `implement/init`, `memory/{init,consolidate}`,
+`ui/{chat,status,memory,memory_commands}`, `plugin/mentor.lua`.
 
 Not yet created (deliberate: modules are created when a milestone needs
-them): `snapshots`, `budget`, `modes/*`, `observer/*`, `ui/{observations,
-diff}`.
+them): `snapshots`, `budget`, `modes/*`, `observer/*`, `ui/observations`.
 
 Known provisional gaps: the tools run synchronously under internal caps
 until async dispatch proves necessary (measured live roundtrips stay well

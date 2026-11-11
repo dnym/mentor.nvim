@@ -12,7 +12,9 @@ conversations persisted locally per project, plus project identity, local
 storage, a shared access policy, read-only investigation tools
 (files/buffers, Git state, diagnostics), and shared persistent memory the
 assistant manages under strict user control (revisions, protection,
-revert, erasure). Observer and Implement arrive in later milestones.
+revert, erasure), and an Implement mode that turns an explicitly selected
+range in one buffer into a previewed, explicitly accepted buffer edit.
+Observer arrives in a later milestone.
 
 Setup: >lua
 
@@ -82,6 +84,33 @@ COMMANDS                                                        *mentor-commands
   :MentorMemory consolidate Run one bounded pass merging redundant
                             unprotected entries in this project.
 
+:MentorImplement {instruction}
+                            Propose a bounded edit for the current visual
+                            selection (characterwise or linewise) or, with
+                            no selection, the insertion point at the
+                            cursor. Runs on one buffer backed by a real
+                            file; off-limits and unmodifiable buffers are
+                            refused. The target range is frozen before the
+                            model runs; the model can only submit
+                            replacement text for exactly that range. Each
+                            proposal opens a side-by-side diff preview.
+                            Blockwise selections are refused with an
+                            explanation. :MentorStop cancels the run and
+                            withdraws its pending proposal.
+
+:MentorImplementAccept [id] Apply the pending proposal (newest, or the
+                            given id). The target is revalidated first:
+                            buffer identity, buffer version, modifiability,
+                            and the current access policy. Any intervening
+                            edit invalidates the proposal — even an edit
+                            later undone — and so does closing the buffer.
+                            Accepting performs one buffer edit in its own
+                            undo block: a single `u` reverts it. The buffer
+                            is never written to disk by the plugin.
+
+:MentorImplementReject [id] Reject the pending proposal. The target buffer
+                            is not touched.
+
 ==============================================================================
 CONFIGURATION                                                *mentor-config*
 
@@ -111,6 +140,13 @@ memory.consolidate_max_entries
                          :MentorMemory consolidate pass.
 memory.view_max_entries  Entries rendered in the :MentorMemory view
                          (newest first).
+implement.context_lines    Lines of surrounding context shown in the
+                         Implement diff preview.
+implement.max_target_bytes
+                         Byte cap on the range captured by
+                         :MentorImplement; larger selections are refused.
+implement.max_replacement_bytes
+                         Byte cap on a proposed replacement.
 
 Local data lives in stdpath("data")/mentor; credentials are read from the
 environment at request time and are never stored.
@@ -155,6 +191,18 @@ sent back to the configured provider; clearing them is a separate,
 explicit action. Each model request reserves its budget atomically before
 dispatch; limits (requests, tool calls, estimated tokens, wall-clock) are
 enforced up front and interrupted work stays accounted for.
+
+The only route from the model to your buffers is the Implement workflow. A
+developer command freezes one target (buffer, range, version) before the
+model runs; the model's single implement tool takes no path or range
+parameters — unknown parameters are rejected — so it cannot retarget or
+widen the change. Nothing is applied until a separate explicit accept,
+which revalidates buffer identity, version, modifiability, and the current
+access policy; any intervening edit (even edit-and-undo) or buffer close
+invalidates the proposal. Application is one buffer edit in its own undo
+block, never a disk write, and generated code is never executed. Coach is
+never offered the implement tool at all: per-mode tool allow-lists keep the
+groups separate.
 
 ==============================================================================
  vim:tw=78:ts=8:ft=help:norl:

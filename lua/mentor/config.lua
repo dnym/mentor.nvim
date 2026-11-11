@@ -102,6 +102,14 @@ function M.defaults()
       -- first to this estimated token budget.
       history_max_tokens = 8000,
     },
+    implement = {
+      -- Lines of surrounding context shown in the diff preview.
+      context_lines = 30,
+      -- Byte cap on the targeted range captured from the buffer.
+      max_target_bytes = 32768,
+      -- Byte cap on a proposed replacement; larger proposals are refused.
+      max_replacement_bytes = 65536,
+    },
     memory = {
       -- Entries injected into a model request (global + current project,
       -- provenance-authorized) and returned by memory searches.
@@ -227,6 +235,10 @@ local function validate(cfg)
   end
 
   check(errors, "chat.history_max_tokens", cfg.chat.history_max_tokens, is_pos_int, "a positive integer")
+
+  for _, key in ipairs({ "context_lines", "max_target_bytes", "max_replacement_bytes" }) do
+    check(errors, "implement." .. key, cfg.implement[key], is_nonneg_int, "a non-negative integer")
+  end
 
   for _, key in ipairs({ "recall_limit", "recall_max_bytes", "consolidate_max_entries", "view_max_entries" }) do
     check(errors, "memory." .. key, cfg.memory[key], is_pos_int, "a positive integer")

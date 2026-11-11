@@ -12,6 +12,7 @@ local records = require("mentor.storage.records")
 local sanitize = require("mentor.sanitize")
 local prompts = require("mentor.prompts")
 local memory_mod = require("mentor.memory")
+local tools_mod = require("mentor.tools")
 
 local M = {}
 
@@ -369,6 +370,10 @@ local function pump_queue()
     mode = "coach",
     project = proj,
     messages = messages,
+    -- Explicit allow-list: Coach gets investigation and memory only. The
+    -- implement group must never reach Coach (or Observer) — edits require
+    -- an explicit :MentorImplement command with a developer-captured target.
+    tools = tools_mod.names({ "investigation", "memory" }),
     on_delta = function(chunk)
       append_delta(buf, op, chunk)
     end,

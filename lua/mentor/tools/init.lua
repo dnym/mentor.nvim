@@ -16,12 +16,14 @@ local files = require("mentor.tools.files")
 local gitmod = require("mentor.tools.git")
 local lang = require("mentor.tools.lang")
 local memorytools = require("mentor.tools.memory")
+local implementtools = require("mentor.tools.implement")
 
 local M = {}
 
 ---@class mentor.Tool
 ---@field summary string
----@field params table<string, string> parameter name -> "string"|"integer"|"boolean", trailing "?" = optional
+---@field params table<string, string> parameter name -> "string"|"integer"|"boolean"|"text", trailing "?" = optional
+---@field group "investigation"|"memory"|"implement"|nil defaults to "investigation"
 ---@field handler fun(ctx: table, args: table): table
 
 ---@type table<string, mentor.Tool>
@@ -123,6 +125,12 @@ M.tools = {
     params = { entry_id = "integer", expected_revision = "integer", reason = "string?" },
     handler = memorytools.delete,
   },
+  propose_edit = {
+    summary = "Propose replacement text for the explicitly targeted range (Implement mode only)",
+    params = { replacement = "text", explanation = "string?" },
+    group = "implement",
+    handler = implementtools.propose_edit,
+  },
 }
 
 ---Names and summaries for prompt construction (later milestones).
@@ -134,7 +142,41 @@ function M.summaries()
   return out
 end
 
-local json_types = { string = "string", integer = "integer", boolean = "boolean" }
+local function group_of(tool)
+  return tool.group or "investigation"
+end
+
+---Tool names grouped for per-mode allow-lists. Coach and Observer must never
+---receive the implement group: propose_edit only works while an explicit
+---:MentorImplement command has captured a target.
+---@param want string[]|nil groups to include (default: all)
+---@return string[] sorted names
+function M.names(want)
+  local set = nil
+  if want then
+    set = {}
+    for _, g in ipairs(want) do
+      set[g] = true
+    end
+  end
+  local out = {}
+  for name, tool in pairs(M.tools) do
+    if not set or set[group_of(tool)] then
+      out[#out + 1] = name
+    end
+  end
+  table.sort(out)
+  return out
+end
+
+---@param name string
+---@return "investigation"|"memory"|"implement"|nil
+function M.group_of(name)
+  local tool = M.tools[name]
+  return tool and group_of(tool) or nil
+end
+
+local json_types = { string = "string", integer = "integer", boolean = "boolean", text = "string" }
 
 ---OpenAI native-tool schemas, names sorted for request determinism.
 ---@param names string[]|nil subset to include (default: all)
@@ -227,6 +269,11 @@ local function validate_params(tool, args)
     elseif base == "string" then
       if type(value) ~= "string" or value == "" then
         problems[#problems + 1] = key .. " must be a non-empty string"
+      end
+    elseif base == "text" then
+      -- Free-form text where empty is meaningful (e.g. deleting a range).
+      if type(value) ~= "string" then
+        problems[#problems + 1] = key .. " must be a string"
       end
     elseif base == "integer" then
       if type(value) ~= "number" or value % 1 ~= 0 then

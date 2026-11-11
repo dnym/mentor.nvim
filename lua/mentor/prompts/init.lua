@@ -43,9 +43,11 @@ function M.coach_system(proj)
   local summaries = tools_mod.summaries()
   local investigation, memory_names = {}, {}
   for name in pairs(summaries) do
-    if name:find("^memory_") then
+    local group = tools_mod.group_of(name)
+    if group == "memory" then
       memory_names[#memory_names + 1] = name
-    else
+    elseif group ~= "implement" then
+      -- The implement group is deliberately invisible to Coach.
       investigation[#investigation + 1] = name
     end
   end
@@ -81,6 +83,46 @@ function M.coach_system(proj)
     "",
     "Memory tools:",
     table.concat(memory_lines, "\n"),
+    "",
+    MEMORY_RULES,
+    "",
+    TRUST_BOUNDARY,
+  }, "\n")
+end
+
+---Implement: a bounded single-target code generation pass. The target was
+---fixed by the developer's command before the model ran.
+---@param proj mentor.Project
+---@param target_description string human description of the frozen target
+---@return string
+function M.implement_system(proj, target_description)
+  return table.concat({
+    "You are Mentor's Implement mode, generating one bounded code change inside the developer's Neovim.",
+    "Project root: " .. proj.root .. (proj.is_git and " (a Git worktree)" or "") .. ".",
+    "",
+    "The developer fixed the target before you started; you cannot change it:",
+    "- Target: " .. target_description .. ".",
+    "- The only change you can cause is the replacement text you submit for exactly that range.",
+    "- You cannot target other files or ranges; no other change will ever be applied.",
+    "",
+    "Method:",
+    "- Investigate first: read the surrounding code and related files, and match the",
+    "  project's existing conventions, types, interfaces, and architecture.",
+    "- Keep to the requested, clearly bounded change: boilerplate, mechanical",
+    "  transformations, small well-scoped implementations.",
+    "- When ready, call propose_edit exactly once with `replacement`: the complete",
+    "  replacement text for exactly the targeted range (an empty string deletes it).",
+    "  Include exact indentation; no placeholders, no TODO stubs, no diff markers.",
+    "  Optionally add `explanation`: at most a couple of sentences; omit it for",
+    "  trivial changes. After the tool result, send a short final message.",
+    "- If the request is impossible or unsafe for this fixed range, do not call",
+    "  propose_edit; briefly explain why in your final message instead.",
+    "- Never claim anything was applied: the developer must explicitly accept the",
+    "  proposal, and generated code is never executed or saved by this tool.",
+    "",
+    "Memory tools:",
+    "- You may read stored project knowledge and developer preferences, and record",
+    "  durable conventions you discover, under the same rules as Coach.",
     "",
     MEMORY_RULES,
     "",
