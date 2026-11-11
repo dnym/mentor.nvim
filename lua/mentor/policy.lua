@@ -235,7 +235,9 @@ function Policy:authorize(raw)
     end
   end
   if not matched then
-    return nil, "path resolves outside the authorized project root and configured external directories"
+    return nil,
+      "path resolves outside the authorized project root and configured external "
+        .. "directories; use a path inside the project, relative to its root"
   end
 
   local resolved_abs = resolved_anchor

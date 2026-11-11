@@ -78,7 +78,7 @@ function M.list_directory(ctx, args)
   end
   local stat = vim.uv.fs_stat(access.abspath)
   if not access.exists or not stat then
-    return { error = "directory does not exist" }
+    return { error = "directory does not exist; check the path with search_files or list the parent" }
   end
   if stat.type ~= "directory" then
     return { error = "path is not a directory; use read_file" }
@@ -133,10 +133,13 @@ function M.read_file(ctx, args)
   local stat = vim.uv.fs_stat(access.abspath)
 
   if not buf and not stat then
-    return { error = "file does not exist on disk and is not loaded in a buffer" }
+    return {
+      error = "file does not exist on disk and is not loaded in a buffer; "
+        .. "check the path with list_directory or search_files",
+    }
   end
   if not buf and stat.type ~= "file" then
-    return { error = "path is not a regular file" }
+    return { error = "path is not a regular file; if it is a directory use list_directory" }
   end
   if not buf and stat.size > ctx.limits.max_file_bytes then
     return {
