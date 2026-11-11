@@ -315,6 +315,73 @@ which is why end-of-buffer linewise ranges end at the last line's text;
 `'undotime'` no longer exists — re-setting `'undolevels'` (even to the same
 value) closes the current undo block.
 
+## Observer: bounded background review (Milestone 6)
+
+`lua/mentor/observer/init.lua` owns activation, triggering, the change
+digest, and the publication pipeline. Design decisions:
+
+- **Activation is consent, stored per endpoint.** Observation stays off
+  for a project until `:MentorObserve enable`, which persists the
+  decision *together with the Observer endpoint accepted at that
+  moment*. On load (and before every pass) the stored endpoint is
+  compared with the current configuration: a changed or empty endpoint
+  flips activation back off, persisted, with a visible notice — a new
+  provider never starts receiving digests by config drift. `pause` is
+  instance-only; `disable` is persisted. `:MentorObserve review` runs an
+  explicit pass on the same pipeline without any activation, because an
+  explicit request is already the consent.
+- **Triggers are debounced and insert-mode aware.** `TextChanged`/
+  `TextChangedI` arm an idle timer, `BufWritePost` a shorter one; no
+  pass starts while Insert mode is active and a pending job is
+  reconsidered on `InsertLeave`. One pending slot per project coalesces
+  to the newest state; one background operation per instance
+  (`running`), and interactive Coach/Implement runs call
+  `observer.preempt()` before dispatch (pending slots survive
+  preemption and rerun afterwards). Cancellation is generation-based:
+  every cancel bumps the state's generation, and a late `on_done` from
+  a superseded generation can never publish.
+- **The digest is built before dispatch, policy-first.** `git status
+  --porcelain -z` plus `vim.diff` of each authorized changed file
+  against `HEAD` (bounded file count and bytes), overlaid with live
+  modified-buffer text where the buffer is fresher than disk
+  (including never-saved named buffers). Policy-hidden files are
+  counted ("N changed file(s) hidden by the access policy"), never
+  transmitted. The digest records a fingerprint baseline (mtime/size +
+  `changedtick` per source, policy generation, HEAD) used later.
+- **Publication revalidates, then filters.** Before anything is stored:
+  the baseline fingerprints, the policy generation, HEAD, and the tool
+  context tracker (`tracker:verify()`) are rechecked — a pass whose
+  sources moved during the model's work publishes marked *stale* and
+  never notifies. Each finding's path refs are re-authorized against
+  the CURRENT policy (a claim resting on a newly excluded path is
+  withheld entirely); concrete high/medium-certainty claims without any
+  surviving authorized file are withheld too. Findings deduplicate on an
+  issue digest (explicit `issue_key`, else category + first ref +
+  summary prefix); a duplicate of an active finding is dropped, a
+  re-confirmation of a dismissed one is kept but silent inside the
+  per-finding cooldown. The notification policy then applies category
+  rules (praise never interrupts, low-certainty design stays in the
+  list, learning is list-only by default), mute/snooze preferences,
+  per-project notification pacing, and typing suppression.
+- **Fingerprint semantics** (learned the hard way): if a buffer is
+  loaded and modified, only the recorded `changedtick` can confirm the
+  claim; otherwise the disk stat is authoritative — a *clean* buffer
+  whose file moved underneath it is honestly stale.
+- **Background budgets are enforced across instances.** The agent loop
+  gates `kind = "background"` dispatch on
+  `usage.window(project, day, 1h)` — committed totals plus in-flight
+  reservations — so the hourly request cap and daily estimated-token
+  cap hold across all Neovim instances sharing one database.
+- **Consolidation rides the same gate.** After an observation pass,
+  `maybe_consolidate` schedules one memory consolidation per project
+  per day (persisted day mark) only when observation is enabled and
+  candidate groups actually exist.
+- Findings live in SQLite (`observation`, `observer_state`,
+  `observation_pref` in migration 004) and surface through
+  `ui/observations.lua` — a read-only scratch view whose staleness
+  marks are recomputed from stored fingerprints on open; restored
+  findings from earlier sessions start stale until revalidated.
+
 ## Chat window scoping
 
 Plugin windows retain their originating project binding
@@ -328,16 +395,19 @@ its buffer is valid.
 Landed: `config`, `health`, `commands`, `project`, `policy`, `sanitize`,
 `context`, `storage/*`, `provider/{init,fake,transport,sse,openai}`,
 `scheduler`, `agent`, `prompts/init`, `tools/{init,files,git,lang,memory,
-implement}`, `implement/init`, `memory/{init,consolidate}`,
-`ui/{chat,status,memory,memory_commands}`, `plugin/mentor.lua`.
+implement,observer}`, `implement/init`, `memory/{init,consolidate}`,
+`observer/init`, `ui/{chat,status,memory,memory_commands,observations}`,
+`plugin/mentor.lua`.
 
 Not yet created (deliberate: modules are created when a milestone needs
-them): `snapshots`, `budget`, `modes/*`, `observer/*`, `ui/observations`.
+them): `snapshots`, `budget`, `modes/*`.
 
 Known provisional gaps: the tools run synchronously under internal caps
 until async dispatch proves necessary (measured live roundtrips stay well
 inside budgets); Coach keeps one linear conversation per project
 (threaded conversations remain open); memory relevance is rule-based
 (scope, refs, recency) until semantic indexing lands; consolidation is
-manual until observation activation provides its scheduling gate;
-one-interactive-operation enforcement is process-global.
+scheduled (daily, gated on observation) but has no automatic trigger
+beyond that gate; observation candidates are the raw change digest — no
+embedding-based relevance ranking yet; one-interactive-operation
+enforcement is process-global.

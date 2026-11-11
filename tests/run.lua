@@ -26,6 +26,7 @@ require("tests.integration.memory_spec")()
 require("tests.integration.memory_tools_spec")()
 require("tests.integration.memory_view_spec")()
 require("tests.integration.implement_spec")()
+require("tests.integration.observer_spec")()
 
 local H = require("tests.support.harness")
 H.summary()

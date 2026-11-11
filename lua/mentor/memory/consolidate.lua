@@ -1,9 +1,10 @@
 -- Bounded memory consolidation: merge redundant or outdated entries.
 --
--- Deliberately manual for now: automatic scheduling is gated behind
--- Observer activation (a later milestone), but the job itself is fully
--- implemented and runs under the shared bounded agent loop with
--- background budgets. Protected (user-authored) entries and deletion
+-- Scheduled automatically by the Observer engine (at most once per project
+-- per day, only while observation is enabled and redundant entries are
+-- actually pending) or manually via :MentorMemory consolidate. The job runs
+-- under the shared bounded agent loop with background budgets and the
+-- Observer provider. Protected (user-authored) entries and deletion
 -- tombstones stay out of reach — they are excluded from candidates and the
 -- memory tools refuse them regardless of what the model asks.
 
@@ -135,6 +136,22 @@ local function render_groups(groups)
   return table.concat(lines, "\n")
 end
 
+---True when a consolidation pass is running in this instance.
+function M.is_active()
+  return active ~= nil
+end
+
+---Number of candidate groups with actual redundancy (the scheduled gate's
+---"work pending" signal; 0 while a pass is already active).
+---@param proj mentor.Project
+---@return integer
+function M.pending(proj)
+  if active then
+    return 0
+  end
+  return #candidate_groups(memory.visible(proj))
+end
+
 ---Run one bounded consolidation pass for a project.
 ---@param proj mentor.Project
 ---@param callbacks table|nil { on_note = fun(string), on_done = fun(err|nil, info) }
@@ -155,7 +172,7 @@ function M.run(proj, callbacks)
     { role = "user", content = "Consolidate the redundant entries listed." },
   }
   local handle, run_err = require("mentor.agent").run({
-    mode = "coach",
+    mode = "observer",
     kind = "background",
     project = proj,
     messages = messages,

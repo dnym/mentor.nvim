@@ -593,6 +593,10 @@ function M.start(instruction, req)
     session.line_idx = li + #replacement - 1
   end
 
+  -- Interactive work preempts automatic background work on the shared
+  -- provider endpoint.
+  require("mentor.observer").preempt()
+
   local handle, run_err = agent.run({
     mode = "implement",
     kind = "interactive",

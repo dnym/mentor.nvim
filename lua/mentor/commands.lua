@@ -34,11 +34,95 @@ function M.register()
     local n = require("mentor.ui.chat").stop()
       + require("mentor.memory.consolidate").stop()
       + require("mentor.implement").stop()
+      + require("mentor.observer").stop()
     vim.notify(
       n > 0 and ("mentor.nvim: cancelled " .. n .. " operation(s)") or "mentor.nvim: nothing to cancel",
       n > 0 and vim.log.levels.INFO or vim.log.levels.DEBUG
     )
   end, { desc = "Cancel running Mentor operations" })
+
+  vim.api.nvim_create_user_command("MentorObserve", function(opts)
+    local observer = require("mentor.observer")
+    local sub = vim.trim(opts.args or "")
+    local ok, msg
+    if sub == "" then
+      local snap = observer.status_snapshot()
+      if snap and snap.enabled then
+        ok, msg = observer.disable()
+      else
+        ok, msg = observer.enable()
+      end
+    elseif sub == "enable" then
+      ok, msg = observer.enable()
+    elseif sub == "disable" then
+      ok, msg = observer.disable()
+    elseif sub == "pause" then
+      ok, msg = observer.pause()
+    elseif sub == "resume" then
+      ok, msg = observer.resume()
+    elseif sub == "review" then
+      ok, msg = observer.review()
+    else
+      notify_error("mentor.nvim: usage :MentorObserve [enable|disable|pause|resume|review]")
+      return
+    end
+    if not ok and msg then
+      notify_error(msg)
+    elseif ok and msg then
+      vim.notify(msg, vim.log.levels.INFO)
+    end
+  end, {
+    desc = "Toggle or control proactive observation for this project",
+    nargs = "?",
+    complete = function(arg_lead)
+      local out = {}
+      for _, s in ipairs({ "enable", "disable", "pause", "resume", "review" }) do
+        if s:find("^" .. vim.pesc(arg_lead)) then
+          out[#out + 1] = s
+        end
+      end
+      return out
+    end,
+  })
+
+  vim.api.nvim_create_user_command("MentorObservations", function()
+    local _, err = require("mentor.ui.observations").open()
+    if err then
+      notify_error(err)
+    end
+  end, { desc = "Open the observation list (dismiss, snooze, mute, rate, explain)" })
+
+  vim.api.nvim_create_user_command("MentorExplain", function(opts)
+    local proj = require("mentor.project").ensure_current()
+    if not proj then
+      notify_error("mentor.nvim: no project context")
+      return
+    end
+    local records_mod = require("mentor.storage.records")
+    local row = records_mod.projects.get(proj.identity)
+    local id
+    local arg = vim.trim(opts.args or "")
+    if arg ~= "" then
+      id = tonumber((arg:gsub("^o", "")))
+    end
+    if not id and row then
+      local rows = records_mod.observations.list_active(row.id)
+      for _, r in ipairs(rows) do
+        if r.dismissed == 0 then
+          id = r.id
+          break
+        end
+      end
+    end
+    if not id then
+      notify_error("mentor.nvim: no observation to explain (:MentorExplain <id>, see :MentorObservations)")
+      return
+    end
+    local ok, err = require("mentor.ui.observations").explain(proj, id)
+    if not ok then
+      notify_error(err)
+    end
+  end, { desc = "Ask Coach to explain an observation (default: newest active)", nargs = "?" })
 
   vim.api.nvim_create_user_command("MentorImplement", function(opts)
     local _, err = require("mentor.implement").start(opts.args, {

@@ -12,9 +12,11 @@ conversations persisted locally per project, plus project identity, local
 storage, a shared access policy, read-only investigation tools
 (files/buffers, Git state, diagnostics), and shared persistent memory the
 assistant manages under strict user control (revisions, protection,
-revert, erasure), and an Implement mode that turns an explicitly selected
-range in one buffer into a previewed, explicitly accepted buffer edit.
-Observer arrives in a later milestone.
+revert, erasure), an Implement mode that turns an explicitly selected
+range in one buffer into a previewed, explicitly accepted buffer edit, and
+an automatic Observer that reviews recent changes in the background —
+off for every project until explicitly enabled, bounded by its own
+budgets, and never able to touch the code it comments on.
 
 Setup: >lua
 
@@ -111,6 +113,35 @@ COMMANDS                                                        *mentor-commands
 :MentorImplementReject [id] Reject the pending proposal. The target buffer
                             is not touched.
 
+:MentorObserve [action]     Control automatic observation for the current
+                            project. No action toggles it. enable
+                            activates it (persisted across restarts, and
+                            bound to the Observer provider endpoint:
+                            changing the endpoint disables it until you
+                            enable again) and states once what will be
+                            transmitted, including unsaved buffer content
+                            inside the access policy. disable turns it
+                            off and cancels running passes. pause stops
+                            background passes for this session only;
+                            resume re-enables them without changing the
+                            persisted setting. review runs one explicit
+                            pass without turning anything on.
+
+:MentorObservations         Open the observation list for the current
+                            project: every finding the Observer recorded,
+                            newest first, with its category, certainty,
+                            reasoning, referenced files, and a staleness
+                            mark recomputed from stored fingerprints.
+                            With the cursor on a finding: d dismiss,
+                            r restore, u useful, x not useful, s snooze
+                            the category (30 minutes), m mute/unmute the
+                            category, <CR> ask Coach to explain it,
+                            R refresh, q close.
+
+:MentorExplain [id]         Ask Coach to explain an observation (by id,
+                            or the newest active finding), opening the
+                            Coach conversation with its full context.
+
 ==============================================================================
 CONFIGURATION                                                *mentor-config*
 
@@ -147,6 +178,34 @@ implement.max_target_bytes
                          :MentorImplement; larger selections are refused.
 implement.max_replacement_bytes
                          Byte cap on a proposed replacement.
+observer.edit_idle_ms    Automatic passes start this long after the last
+                         edit in a project buffer (TextChanged).
+observer.save_debounce_ms
+                         Shorter debounce used after a save instead.
+observer.notify_cooldown_ms
+                         Per-finding cooldown: a dismissed finding that
+                         is re-confirmed waits this long before it may
+                         interrupt again (default ten minutes).
+observer.notify_min_gap_ms
+                         At most one unsolicited notification per project
+                         per this interval (default one minute).
+observer.category_snooze_ms
+                         Duration of the observation-list "snooze
+                         category" action (default thirty minutes).
+observer.notify_learning Learning-category findings notify only when
+                         this is on (default off; they always stay in
+                         the list).
+observer.digest_total_bytes
+                         Byte cap on the change digest composed for each
+                         pass.
+observer.digest_file_bytes
+                         Per-file cap inside the digest.
+observer.list_max_items  Findings rendered in :MentorObservations.
+limits.background.*      Background budgets, enforced across all
+                         instances through local storage:
+                         requests_per_hour_per_project and
+                         est_tokens_per_day_per_project gate every
+                         automatic pass for the project.
 
 Local data lives in stdpath("data")/mentor; credentials are read from the
 environment at request time and are never stored.
@@ -203,6 +262,26 @@ invalidates the proposal. Application is one buffer edit in its own undo
 block, never a disk write, and generated code is never executed. Coach is
 never offered the implement tool at all: per-mode tool allow-lists keep the
 groups separate.
+
+The Observer is strictly read-only and opt-in. Observation stays off for a
+project until :MentorObserve enable, and the activation is stored together
+with the Observer provider endpoint: a changed or removed endpoint flips
+it back off (persisted, with a visible notice) until explicitly enabled
+again. Automatic passes build a change digest — diffs against HEAD plus
+live modified-buffer content — already filtered by the access policy
+(excluded files are counted, never transmitted) and capped in size;
+digest, tool results, and findings go through the same sanitization as
+every other source. Publication revalidates everything: finding refs are
+re-authorized against the current policy (a claim resting on a newly
+excluded path is withheld), and if a source, the checkout, or the policy
+moved while the pass ran, the result is stored marked stale and never
+notifies. Late or cancelled results can never publish. Findings are
+advice only: the Observer has no editing tool, and its notifications are
+deduplicated, rate-limited, suppressed while typing, and fully
+controllable (dismiss, mute, snooze) from the observation list. Background
+passes run on their own tighter budgets with per-project hourly request
+and daily token caps enforced across all instances, and interactive work
+always preempts them.
 
 ==============================================================================
  vim:tw=78:ts=8:ft=help:norl:

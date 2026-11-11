@@ -550,4 +550,248 @@ function usage.sweep(stale_ms)
   return (released or 0), #stale
 end
 
+---Background load across all plugin instances for the daily/hourly gates:
+---committed day totals plus in-flight reservations. Hourly counts consider
+---reservations created inside the window (every in-flight reservation was
+---created within the last few minutes in practice); the daily figure counts
+---every open reservation conservatively.
+---@param project_id integer
+---@param day string
+---@param window_ms integer
+---@return table { requests_hour, est_tokens_day, requests_day }
+function usage.window(project_id, day, window_ms)
+  local now = math.floor(vim.uv.now())
+  local day_row = storage.query(
+    "SELECT model_requests, est_tokens FROM usage_day WHERE project_id = ? AND day = ? AND kind = 'background';",
+    { project_id, day }
+  )[1]
+  local open = storage.query(
+    "SELECT model_requests, est_tokens, created_at FROM usage_reservation"
+      .. " WHERE project_id = ? AND kind = 'background';",
+    { project_id }
+  )
+  local out = {
+    requests_hour = day_row and day_row.model_requests or 0,
+    est_tokens_day = (day_row and day_row.est_tokens or 0),
+    requests_day = day_row and day_row.model_requests or 0,
+  }
+  for _, row in ipairs(open) do
+    out.est_tokens_day = out.est_tokens_day + row.est_tokens
+    out.requests_day = out.requests_day + row.model_requests
+    if now - row.created_at <= window_ms then
+      out.requests_hour = out.requests_hour + row.model_requests
+    end
+  end
+  return out
+end
+
+-- Observer: per-project activation and persisted findings.
+local observer = {}
+M.observer = observer
+
+---@param project_id integer
+---@return table|nil row { enabled, endpoint, consolidation_day }
+function observer.state(project_id)
+  return storage.query("SELECT * FROM observer_state WHERE project_id = ?;", { project_id })[1]
+end
+
+---Persisted enable/disable decision bound to the endpoint accepted at
+---activation. Disabling overwrites the endpoint marker so an endpoint
+---change always forces a fresh explicit activation.
+---@param project_id integer
+---@param enabled boolean
+---@param endpoint string
+function observer.set_enabled(project_id, enabled, endpoint)
+  storage.execute(
+    "INSERT INTO observer_state (project_id, enabled, endpoint, updated_at) VALUES (?, ?, ?, ?)"
+      .. " ON CONFLICT (project_id) DO UPDATE SET"
+      .. " enabled = excluded.enabled, endpoint = excluded.endpoint, updated_at = excluded.updated_at;",
+    { project_id, enabled, enabled and endpoint or "", math.floor(vim.uv.now()) }
+  )
+end
+
+---@param project_id integer
+---@return string|nil day of the last scheduled consolidation pass
+function observer.consolidation_day(project_id)
+  local row = observer.state(project_id)
+  return row and row.consolidation_day
+end
+
+---@param project_id integer
+---@param day string
+function observer.set_consolidation_day(project_id, day)
+  storage.execute(
+    "INSERT INTO observer_state (project_id, enabled, endpoint, consolidation_day, updated_at)"
+      .. " VALUES (?, 0, '', ?, ?)"
+      .. " ON CONFLICT (project_id) DO UPDATE SET consolidation_day = excluded.consolidation_day,"
+      .. " updated_at = excluded.updated_at;",
+    { project_id, day, math.floor(vim.uv.now()) }
+  )
+end
+
+local observations = {}
+M.observations = observations
+
+---@class mentor.ObservationInsert
+---@field project_id integer
+---@field category string
+---@field summary string
+---@field reasoning string|nil
+---@field certainty string
+---@field refs string[]|nil
+---@field fingerprints table|nil
+---@field question string|nil
+---@field issue_digest string
+---@field stale boolean|nil
+
+---@param o mentor.ObservationInsert
+---@return integer id
+function observations.insert(o)
+  local _, id = storage.execute(
+    "INSERT INTO observation (project_id, category, summary, reasoning, certainty, refs,"
+      .. " fingerprints, question, issue_digest, dismissed, stale, created_at)"
+      .. " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?);",
+    {
+      o.project_id,
+      o.category,
+      o.summary,
+      o.reasoning or "",
+      o.certainty,
+      o.refs and vim.json.encode(o.refs) or nil,
+      o.fingerprints and vim.json.encode(o.fingerprints) or nil,
+      o.question or "",
+      o.issue_digest,
+      o.stale and 1 or 0,
+      math.floor(vim.uv.now()),
+    }
+  )
+  return id
+end
+
+---@param id integer
+---@return table|nil row
+function observations.get(id)
+  return storage.query("SELECT * FROM observation WHERE id = ?;", { id })[1]
+end
+
+---Active (non-dismissed) findings for dedup and cooldown checks.
+---@param project_id integer
+---@return table[] rows
+function observations.list_active(project_id)
+  return storage.query(
+    "SELECT * FROM observation WHERE project_id = ? AND dismissed = 0 ORDER BY created_at DESC, id DESC;",
+    { project_id }
+  )
+end
+
+---Every finding for the list view, dismissed and stale included.
+---@param project_id integer
+---@param limit integer
+---@return table[] rows
+function observations.list_all(project_id, limit)
+  return storage.query(
+    "SELECT * FROM observation WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT ?;",
+    { project_id, limit }
+  )
+end
+
+---@param project_id integer
+---@return integer
+function observations.count(project_id)
+  return storage.scalar(
+    "SELECT COUNT(*) FROM observation WHERE project_id = ? AND dismissed = 0;",
+    { project_id }
+  ) or 0
+end
+
+---Most recent finding with this dedup key (active or dismissed), used by
+---the publication pipeline: an active match is a duplicate to drop, a
+---dismissed match re-notifies only after the per-finding cooldown.
+---@param project_id integer
+---@param digest string
+---@return table|nil row
+function observations.latest_by_digest(project_id, digest)
+  return storage.query(
+    "SELECT * FROM observation WHERE project_id = ? AND issue_digest = ? ORDER BY created_at DESC, id DESC LIMIT 1;",
+    { project_id, digest }
+  )[1]
+end
+
+---@param project_id integer
+---@return table { active, stale, dismissed, useful, not_useful }
+function observations.counts(project_id)
+  local function count(where, extra)
+    local params = { project_id }
+    for _, v in ipairs(extra or {}) do
+      params[#params + 1] = v
+    end
+    return storage.scalar("SELECT COUNT(*) FROM observation WHERE project_id = ? AND " .. where, params) or 0
+  end
+  return {
+    active = count("dismissed = 0"),
+    stale = count("dismissed = 0 AND stale = 1"),
+    dismissed = count("dismissed = 1"),
+    useful = count("rating = 'useful'"),
+    not_useful = count("rating = 'not-useful'"),
+  }
+end
+
+---@param id integer
+---@param notified_at integer|nil
+function observations.mark_notified(id, notified_at)
+  storage.execute("UPDATE observation SET notified_at = ? WHERE id = ?;", {
+    notified_at or math.floor(vim.uv.now()),
+    id,
+  })
+end
+
+---@param id integer
+---@param dismissed boolean
+function observations.set_dismissed(id, dismissed)
+  storage.execute("UPDATE observation SET dismissed = ? WHERE id = ?;", {
+    dismissed and 1 or 0,
+    id,
+  })
+end
+
+---@param id integer
+---@param stale boolean
+function observations.set_stale(id, stale)
+  storage.execute("UPDATE observation SET stale = ? WHERE id = ?;", { stale and 1 or 0, id })
+end
+
+---@param id integer
+---@param rating "useful"|"not-useful"|nil
+function observations.set_rating(id, rating)
+  storage.execute("UPDATE observation SET rating = ? WHERE id = ?;", { rating, id })
+end
+
+---@param project_id integer
+---@return table[] rows { category, muted, snooze_until }
+function observer.prefs(project_id)
+  return storage.query("SELECT * FROM observation_pref WHERE project_id = ?;", { project_id })
+end
+
+---@param project_id integer
+---@param category string
+---@param muted boolean|nil nil leaves the current mute state untouched
+---@param snooze_until integer|nil nil leaves the current snooze untouched
+function observer.set_pref(project_id, category, muted, snooze_until)
+  storage.execute(
+    "INSERT INTO observation_pref (project_id, category, muted, snooze_until, updated_at)"
+      .. " VALUES (?, ?, ?, ?, ?)"
+      .. " ON CONFLICT (project_id, category) DO UPDATE SET"
+      .. " muted = COALESCE(excluded.muted, observation_pref.muted),"
+      .. " snooze_until = COALESCE(excluded.snooze_until, observation_pref.snooze_until),"
+      .. " updated_at = excluded.updated_at;",
+    {
+      project_id,
+      category,
+      muted == nil and nil or (muted and 1 or 0),
+      snooze_until,
+      math.floor(vim.uv.now()),
+    }
+  )
+end
+
 return M

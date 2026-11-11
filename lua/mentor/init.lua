@@ -44,6 +44,9 @@ function M.setup(opts)
     return
   end
   define_autocmds()
+  -- Observer trigger autocmds are cheap and gated on per-project activation;
+  -- nothing is observed until a project explicitly enables it.
+  require("mentor.observer").install()
 end
 
 function M.status()

@@ -3,7 +3,7 @@
 Learning-oriented AI assistance for Neovim: autonomous in understanding code,
 deliberately restrained in writing it.
 
-**Status: Milestone 5 — Implement mode: proposals with guarded edits.**
+**Status: Milestone 6 — automatic Observer with user-controlled feedback.**
 Project identity, local SQLite storage, an async transport, an interactive
 Coach conversation driven end to end against any OpenAI-compatible provider
 (streaming responses, native tool use, per-operation budgets, cancellation,
@@ -17,7 +17,10 @@ provenance, are inspectable and editable as generated Markdown
 (`:MentorMemory`), support revert, reversible deletion, permanent erasure,
 and protection, and are re-authorized against the current access policy
 before every request. Coach transcripts persist locally and resume across
-restarts. Automatic observation arrives in a later milestone.
+restarts. The Observer — bounded background reviews of your recent changes —
+is off for every project until you explicitly enable it (`:MentorObserve`),
+and its findings are only ever advice: deduplicated, freshness-checked,
+rate-limited, and fully under your control (`:MentorObservations`).
 
 Requires Neovim **v0.12.6+** on Arch/Arch-based systems (other Linux systems
 best effort).
@@ -96,8 +99,19 @@ require("mentor").setup({
   memory = {
     recall_limit = 12,          -- entries injected into a request / searched
     recall_max_bytes = 4096,    -- byte cap on the injected memory block
-    consolidate_max_entries = 60, -- candidates considered per manual pass
+    consolidate_max_entries = 60, -- candidates considered per memory or scheduled pass
     view_max_entries = 300,     -- entries rendered in :MentorMemory
+  },
+  observer = {
+    edit_idle_ms = 2000,        -- automatic pass starts this long after the last edit
+    save_debounce_ms = 1000,    -- saves use this (shorter) debounce
+    notify_cooldown_ms = 600000, -- ten minutes before the same finding can interrupt again
+    notify_min_gap_ms = 60000,  -- at most one unsolicited notification per project per minute
+    category_snooze_ms = 1800000, -- "snooze category" duration (thirty minutes)
+    notify_learning = false,    -- learning findings stay list-only unless this is on
+    digest_total_bytes = 12288, -- byte cap on the change digest per pass
+    digest_file_bytes = 2048,   -- per-file cap inside the digest
+    list_max_items = 100,       -- findings rendered in :MentorObservations
   },
   dev = { fake_provider = false }, -- offline placeholder provider for UI work
 })
@@ -114,8 +128,11 @@ named, actionable errors.
 | `:MentorChat` | Open the Coach conversation for the current project |
 | `:MentorChatAsk {question}` | Ask Coach immediately |
 | `:MentorChatClear` | Clear the Coach transcript for the current project (memory is untouched) |
-| `:MentorStop` | Cancel running operations (Coach, consolidation, Implement runs) |
-| `:MentorStatus` | Configuration, providers, storage, activity, memory totals |
+| `:MentorStop` | Cancel running operations (Coach, consolidation, Implement runs, observation passes) |
+| `:MentorStatus` | Configuration, providers, storage, activity, usage, memory and observation totals |
+| `:MentorObserve [enable\|disable\|pause\|resume\|review]` | Turn automatic observation on/off for this project (no argument toggles); `pause`/`resume` are session-only; `review` runs one explicit pass without enabling |
+| `:MentorObservations` | Open the observation list (dismiss, restore, rate, snooze, mute, Coach handoff) |
+| `:MentorExplain [id]` | Ask Coach to explain an observation (default: newest active) |
 | `:MentorImplement {instruction}` | Propose a bounded edit for a visual selection or the insertion point; opens a diff preview |
 | `:MentorImplementAccept [id]` | Apply the pending proposal (one `u` reverts it) |
 | `:MentorImplementReject [id]` | Reject the pending proposal (the buffer stays untouched) |
@@ -172,6 +189,49 @@ never saved by the plugin and generated code is never executed. Proposals
 live only in memory; `:MentorStop` cancels a run and withdraws its pending
 proposal.
 
+## Observation
+
+The Observer reviews your recent changes in the background and reports
+things worth knowing: a call site the diff broke, a design trade-off,
+something in the project it thinks you'd find worth learning. It is
+**off for every project until you explicitly enable it** with
+`:MentorObserve enable`, and the activation is stored together with the
+Observer provider's endpoint: change the endpoint and observation turns
+itself off until you re-enable it, so a new provider never starts seeing
+your code by accident. Enabling states once, plainly, what will be
+transmitted — including unsaved buffer content inside the access policy.
+
+Automatic passes start after an edit settles (idle debounce) or after a
+save (shorter debounce), never while you are in Insert mode, and each
+project keeps at most one pending pass that coalesces to your newest
+state. Every pass sees a change digest — diffs against HEAD plus the
+current state of modified buffers — capped in size and already filtered
+by the access policy (policy-excluded files are counted, never
+transmitted). Passes run on their own, tighter budgets than interactive
+work, including per-project hourly request and daily token caps shared
+across all your Neovim instances, and interactive requests always
+preempt background work. Explicit `:MentorObserve review` runs a pass on
+demand without turning anything on.
+
+Findings are advice, never actions — the Observer has no way to touch
+your code. Before anything is presented, each pass is revalidated: if
+your files, the checkout, or the access policy moved while the model was
+thinking, the result is marked stale instead of interrupting you.
+Findings deduplicate by issue kind and location; dismissing one makes a
+later re-confirmation wait out a ten-minute cooldown instead of nagging.
+Notifications follow a deliberately quiet policy (praise never
+interrupts, low-confidence design notes stay in the list, at most one
+unsolicited notification per project per minute, nothing while you are
+typing), and `:MentorObservations` puts the rest under your control:
+dismiss/restore, useful/not-useful rating, per-category snooze and mute,
+and `<CR>` for a Coach handoff (`:MentorExplain`) when you want the
+reasoning walked through.
+
+Observation also schedules memory consolidation: at most once per
+project per day, only while observation is enabled and redundant
+entries are actually pending — the same bounded pass
+`:MentorMemory consolidate` runs by hand, under the same protections.
+
 ## Development
 
 ```sh
@@ -224,6 +284,17 @@ decisions and [CONTRIBUTING.md](CONTRIBUTING.md) for conventions.
 - Stored tool results are re-authorized against the current access policy
   before every model request: a file excluded after the fact is withheld
   from later requests even if it was read earlier in the same conversation.
+- Observation is opt-in per project and bound to the endpoint it was
+  enabled against: changing the provider endpoint disables it until
+  re-enabled, and enabling says once what will be transmitted. Its change
+  digest is policy-filtered before composition (excluded files are
+  counted, never sent) and size-capped; finding refs are re-authorized
+  against the current policy before publication, and a finding resting
+  on a newly excluded path is withheld entirely.
+- Background observation load is capped per project across all running
+  instances (hourly requests, daily estimated tokens) in local storage,
+  so several editors against one project cannot stack up provider load;
+  interactive requests always preempt background passes.
 - Every model request first reserves its budget locally (atomic, crash-safe):
   model-request, tool-call, token, and wall-clock limits are enforced before
   dispatch, and an interrupted request stays accounted for rather than

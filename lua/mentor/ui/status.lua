@@ -54,11 +54,21 @@ local function collect_lines()
   end
 
   local implement_mod = require("mentor.implement")
+  local observer_mod = require("mentor.observer")
+  local obs_activity = observer_mod.activity()
   local active = chat.active_count()
     + require("mentor.memory.consolidate").active_count()
     + implement_mod.active_count()
+    + (obs_activity.running and 1 or 0)
   lines[#lines + 1] = "Active operations: "
     .. (active > 0 and tostring(active) .. " (Ctrl-C safe; :MentorStop cancels)" or "none")
+  if obs_activity.running then
+    lines[#lines + 1] = "Observer: background investigation running for " .. obs_activity.running
+  end
+  if #obs_activity.pending > 0 then
+    table.sort(obs_activity.pending)
+    lines[#lines + 1] = "Observer: pending pass(es) for " .. table.concat(obs_activity.pending, ", ")
+  end
   local queued = chat.queued_count()
   if queued > 0 then
     lines[#lines + 1] = "Queued requests: " .. tostring(queued)
@@ -79,7 +89,31 @@ local function collect_lines()
       .. " requests, ~"
       .. totals.est_tokens
       .. " est tokens"
+      .. (totals.reported_input + totals.reported_output > 0 and (" (provider reported " .. totals.reported_input .. "/" .. totals.reported_output .. ")") or "")
       .. (totals.open_reservations > 0 and (" (" .. totals.open_reservations .. " in flight)") or "")
+    local btotals = records_mod.usage.totals(row_id, records_mod.usage.today(), "background")
+    lines[#lines + 1] = "Usage today (background, this project): "
+      .. btotals.model_requests
+      .. " requests, ~"
+      .. btotals.est_tokens
+      .. " est tokens"
+      .. (btotals.reported_input + btotals.reported_output > 0 and (" (provider reported " .. btotals.reported_input .. "/" .. btotals.reported_output .. ")") or "")
+      .. (btotals.open_reservations > 0 and (" (" .. btotals.open_reservations .. " in flight)") or "")
+    local snap = observer_mod.status_snapshot(proj) or { enabled = false }
+    lines[#lines + 1] = "Observer: "
+      .. (snap.enabled and (snap.paused and "paused (this session only)" or "on") or "off")
+      .. (snap.pending and "; pass pending" or "")
+      .. " — :MentorObserve"
+    local oc = records_mod.observations.counts(row_id)
+    if oc.active + oc.dismissed > 0 then
+      lines[#lines + 1] = "Observations: "
+        .. oc.active
+        .. " active"
+        .. (oc.stale > 0 and (" (" .. oc.stale .. " stale)") or "")
+        .. (oc.dismissed > 0 and (", " .. oc.dismissed .. " dismissed") or "")
+        .. (oc.useful + oc.not_useful > 0 and ("; rated " .. oc.useful .. " useful / " .. oc.not_useful .. " not useful") or "")
+        .. " — :MentorObservations"
+    end
     local memory_mod = require("mentor.memory")
     local mc = memory_mod.counts(proj)
     lines[#lines + 1] = "Memory: "
@@ -96,7 +130,8 @@ local function collect_lines()
   lines[#lines + 1] = "(or the offline fake provider when dev.fake_provider is set)."
   lines[#lines + 1] = "Implement proposes one bounded buffer edit at a time; nothing applies without"
   lines[#lines + 1] = "an explicit :MentorImplementAccept."
-  lines[#lines + 1] = "Automatic observation arrives in a later milestone."
+  lines[#lines + 1] = "Automatic observation is off for every project until :MentorObserve enable (it"
+  lines[#lines + 1] = "transmits change digests, including unsaved code, to the Observer provider)."
   return lines
 end
 

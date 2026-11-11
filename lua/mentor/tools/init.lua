@@ -17,6 +17,7 @@ local gitmod = require("mentor.tools.git")
 local lang = require("mentor.tools.lang")
 local memorytools = require("mentor.tools.memory")
 local implementtools = require("mentor.tools.implement")
+local observertools = require("mentor.tools.observer")
 
 local M = {}
 
@@ -131,6 +132,15 @@ M.tools = {
     group = "implement",
     handler = implementtools.propose_edit,
   },
+  report_observations = {
+    summary = "Report findings at the end of an observation pass: each object needs category "
+      .. "(correctness|design|learning|praise) and summary; include refs (paths the claim rests on), "
+      .. "reasoning, certainty (high|medium|low), question (constructive next step), and a stable "
+      .. "issue_key slug for the issue kind. An empty findings list is a valid, explicit no-result.",
+    params = { findings = "array" },
+    group = "observer",
+    handler = observertools.report_observations,
+  },
 }
 
 ---Names and summaries for prompt construction (later milestones).
@@ -176,7 +186,13 @@ function M.group_of(name)
   return tool and group_of(tool) or nil
 end
 
-local json_types = { string = "string", integer = "integer", boolean = "boolean", text = "string" }
+local json_types = {
+  string = "string",
+  integer = "integer",
+  boolean = "boolean",
+  text = "string",
+  array = "array",
+}
 
 ---OpenAI native-tool schemas, names sorted for request determinism.
 ---@param names string[]|nil subset to include (default: all)
@@ -207,6 +223,9 @@ function M.schemas(names)
         local typ = tool.params[param]
         local base = typ:sub(-1) == "?" and typ:sub(1, -2) or typ
         properties[param] = { type = json_types[base] or "string" }
+        if properties[param].type == "array" then
+          properties[param].items = { type = "object" }
+        end
         if typ:sub(-1) ~= "?" then
           required[#required + 1] = param
         end
@@ -282,6 +301,11 @@ local function validate_params(tool, args)
     elseif base == "boolean" then
       if type(value) ~= "boolean" then
         problems[#problems + 1] = key .. " must be a boolean"
+      end
+    elseif base == "array" then
+      -- A list; an empty list is meaningful (an explicit no-result).
+      if type(value) ~= "table" or #value == 0 and next(value) ~= nil then
+        problems[#problems + 1] = key .. " must be a list"
       end
     end
   end

@@ -5,9 +5,9 @@ NVIM ?= nvim
 test:
 	$(NVIM) --headless -u tests/minimal_init.lua -c "luafile tests/run.lua" -c "qa!"
 
-# Network check against a real endpoint; skipped unless both variables are set.
+# Network checks against a real endpoint; skipped unless both variables are set.
 live-test:
-	$(NVIM) --headless -u tests/minimal_init.lua -c "lua require('tests.live.live_check')(); require('tests.support.harness').summary(); require('tests.support.fs').cleanup()" -c "qa!"
+	$(NVIM) --headless -u tests/minimal_init.lua -c "lua require('tests.live.live_check')(); require('tests.live.observer_check')(); require('tests.support.harness').summary(); require('tests.support.fs').cleanup()" -c "qa!"
 
 fmt:
 	stylua .

@@ -366,6 +366,10 @@ local function pump_queue()
     insert_note(buf, op, text)
   end
 
+  -- Interactive work preempts automatic background work (observations and
+  -- consolidation share the provider endpoint); pending jobs resume after.
+  require("mentor.observer").preempt()
+
   local handle, run_err = require("mentor.agent").run({
     mode = "coach",
     project = proj,

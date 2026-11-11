@@ -127,6 +127,14 @@ function M.defaults()
       notify_cooldown_ms = 600000, -- ten minutes per finding
       notify_min_gap_ms = 60000, -- at most one unsolicited notification per project per minute
       category_snooze_ms = 1800000, -- thirty minutes
+      -- Learning-category findings notify by default (they are usually the
+      -- least urgent; the observation list always shows them).
+      notify_learning = false,
+      -- Byte caps on the change digest handed to the model at pass start.
+      digest_total_bytes = 12288,
+      digest_file_bytes = 2048,
+      -- Findings rendered in :MentorObservations (newest first).
+      list_max_items = 100,
     },
     context = {
       -- Additional exclusion patterns applied to every context source
@@ -250,6 +258,9 @@ local function validate(cfg)
     "notify_cooldown_ms",
     "notify_min_gap_ms",
     "category_snooze_ms",
+    "digest_total_bytes",
+    "digest_file_bytes",
+    "list_max_items",
   }) do
     check(
       errors,
@@ -259,6 +270,7 @@ local function validate(cfg)
       "a non-negative integer of milliseconds"
     )
   end
+  check(errors, "observer.notify_learning", cfg.observer.notify_learning, is_bool, "a boolean")
 
   check(errors, "context.exclusions", cfg.context.exclusions, is_str_array, "a list of glob patterns")
   for _, key in ipairs({

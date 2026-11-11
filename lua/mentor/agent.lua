@@ -88,6 +88,8 @@ end
 ---@field on_tool fun(phase: "start"|"done", call: table, result: table|nil)|nil
 ---@field on_message fun(msg: table)|nil each assistant/tool message appended
 ---@field on_note fun(text: string)|nil progress notices (retries)
+---@field tool_ctx_extra table|nil extra fields merged into the tool operation
+---  context (used by the Observer engine to attach its findings sink)
 ---@field on_done fun(err: string|nil, info: table) terminal callback, exactly once
 
 ---Run one bounded agent operation. Returns a handle with :cancel() and :is_active().
@@ -131,11 +133,14 @@ function M.run(opts)
   end
 
   local tool_ctx = tools_mod.new_operation({ project = opts.project })
+  for key, value in pairs(opts.tool_ctx_extra or {}) do
+    tool_ctx[key] = value
+  end
   local tool_schemas = tools_mod.schemas(opts.tools)
   local deadline = vim.uv.now() + limits.elapsed_s * 1000
   local day = records.usage.today()
 
-  local op = { cancelled = false, active = true, provider_handle = nil }
+  local op = { cancelled = false, active = true, provider_handle = nil, tool_ctx = tool_ctx }
   local finished = false
   local model_requests_used = 0
   local tool_calls_used = 0
@@ -351,6 +356,26 @@ function M.run(opts)
     end
     if vim.uv.now() >= deadline then
       return stop_at_limit("elapsed time limit (" .. limits.elapsed_s .. "s) reached")
+    end
+    if kind == "background" then
+      -- Cross-instance gates for automatic work: background load for this
+      -- project (committed totals + in-flight reservations) is capped per
+      -- hour and per day so multiple Neovim instances cannot stack up.
+      local hourly_cap = limits.requests_per_hour_per_project
+      local daily_cap = limits.est_tokens_per_day_per_project
+      if (hourly_cap and hourly_cap > 0) or (daily_cap and daily_cap > 0) then
+        local window = records.usage.window(project_id, day, 3600000)
+        if hourly_cap and hourly_cap > 0 and window.requests_hour >= hourly_cap then
+          return stop_at_limit(
+            "background hourly request cap (" .. hourly_cap .. ") reached for this project"
+          )
+        end
+        if daily_cap and daily_cap > 0 and window.est_tokens_day >= daily_cap then
+          return stop_at_limit(
+            "background daily estimated token cap (" .. daily_cap .. ") reached for this project"
+          )
+        end
+      end
     end
     recheck_stored_context()
     local next_est = estimate(messages)
