@@ -1,5 +1,6 @@
 -- Integration: the Coach scratch buffer driven by the fake asynchronous
--- provider — streaming delivery, cancellation, single-operation guard, and
+-- provider — streaming delivery, cancellation, automatic queuing of
+-- additional requests, transcript persistence across buffer reopen, and
 -- project binding that survives focus changes.
 
 local H = require("tests.support.harness")
@@ -7,6 +8,7 @@ local fs = require("tests.support.fs")
 local mentor = require("mentor")
 local project = require("mentor.project")
 local chat = require("mentor.ui.chat")
+local storage = require("mentor.storage")
 local fake = require("mentor.provider.fake")
 
 return function()
@@ -14,6 +16,7 @@ return function()
   local function configure(label)
     chat.reset()
     project.reset()
+    storage.close() -- reopen against this test's data dir
     fake._scripted = nil
     fake.chunk_delay_ms = 5
     mentor.setup({
@@ -66,19 +69,19 @@ return function()
     H.eq(vim.api.nvim_get_current_win(), win, "same window")
   end)
 
-  H.test("asking streams the full scripted response into the buffer", function()
+  H.test("asking streams the scripted response and records usage", function()
     configure("stream")
     edit_git_project("streamproj")
     vim.cmd("MentorChat")
     fake.script({ "alpha beta gamma delta" })
     vim.cmd("MentorChatAsk how do I structure this module?")
     wait_until(function()
-      return chat.active_count() == 0
+      return chat.active_count() == 0 and chat.queued_count() == 0
     end)
     local text = chat_text()
     H.contains_text(text, "> how do I structure this module?", "user line recorded")
     H.contains_text(text, "alpha beta gamma delta", "full response streamed")
-    H.contains_text(text, "[fake provider,", "usage note")
+    H.contains_text(text, "1 model request(s)", "usage note")
   end)
 
   H.test("responses arrive incrementally while the editor stays responsive", function()
@@ -95,7 +98,7 @@ return function()
     H.contains_text(partial, "word1", "streaming has begun")
     H.ok(not partial:find("word60", 1, true), "stream not finished yet")
     wait_until(function()
-      return chat.active_count() == 0
+      return chat.active_count() == 0 and chat.queued_count() == 0
     end)
     H.contains_text(chat_text(), "word60", "completed eventually")
   end)
@@ -116,18 +119,64 @@ return function()
     H.eq(chat_text(), snapshot, "no late deltas after cancellation")
   end)
 
-  H.test("a second interactive request is refused while one runs", function()
-    configure("guard")
-    edit_git_project("guardproj")
-    fake.chunk_delay_ms = 20
+  H.test("additional requests queue automatically and run in order", function()
+    configure("queue")
+    edit_git_project("queueproj")
+    fake.chunk_delay_ms = 10
     vim.cmd("MentorChat")
-    fake.script({ "one two three four five" })
-    local ok = chat.ask("first question")
-    H.ok(ok, "first ask accepted")
-    local ok2, err = chat.ask("second question")
-    H.ok(not ok2, "second ask refused")
-    H.contains_text(err, "already running", "actionable refusal")
-    vim.cmd("MentorStop")
+    fake.script({ words("first", 25), "second answer" })
+    local ok1 = chat.ask("first question")
+    local ok2 = chat.ask("second question")
+    H.ok(ok1 and ok2, "both asks accepted")
+    H.eq(chat.active_count(), 1, "one operation active")
+    H.eq(chat.queued_count(), 1, "second request queued")
+    H.contains_text(chat_text(), "[queued]", "queue notice")
+    wait_until(function()
+      return chat.active_count() == 0 and chat.queued_count() == 0
+    end)
+    local text = chat_text()
+    local first_at = text:find("first1", 1, true)
+    local second_at = text:find("second answer", 1, true)
+    H.ok(first_at and second_at, "both answers present")
+    H.ok(first_at < second_at, "answers ran in order")
+  end)
+
+  H.test("the transcript persists and resumes after the buffer closes", function()
+    configure("resume")
+    edit_git_project("resumeproject")
+    vim.cmd("MentorChat")
+    fake.script({ "the answer holds the concept" })
+    chat.ask("explain this pattern")
+    wait_until(function()
+      return chat.active_count() == 0 and chat.queued_count() == 0
+    end)
+
+    -- Close the buffer and forget in-memory state, then reopen Coach: the
+    -- conversation must be rendered from storage.
+    local buf = vim.api.nvim_get_current_buf()
+    chat.reset()
+    vim.api.nvim_buf_delete(buf, { force = true })
+    vim.cmd("MentorChat")
+    local text = chat_text()
+    H.contains_text(text, "> explain this pattern", "persisted user turn")
+    H.contains_text(text, "the answer holds the concept", "persisted assistant turn")
+  end)
+
+  H.test("assistant turns with native tool calls render as activity notes", function()
+    configure("toolnote")
+    edit_git_project("toolnoteproject")
+    vim.cmd("MentorChat")
+    fake.script({
+      { content = "", tool_calls = { { name = "read_file", arguments = { path = "main.lua" } } } },
+      { content = "now I can explain" },
+    })
+    chat.ask("what does main.lua do?")
+    wait_until(function()
+      return chat.active_count() == 0 and chat.queued_count() == 0
+    end)
+    local text = chat_text()
+    H.contains_text(text, "⌁ read_file main.lua", "tool activity line")
+    H.contains_text(text, "now I can explain", "final answer after tool roundtrip")
   end)
 
   H.test("each project gets its own chat and keeps its binding", function()

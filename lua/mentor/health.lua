@@ -46,7 +46,7 @@ function M.check()
   end
 
   if vim.fn.executable("git") == 1 then
-    vim.health.ok("git available (optional: history/diff tools in later milestones)")
+    vim.health.ok("git available (optional: git history/diff tools degrade gracefully without it)")
   else
     vim.health.warn("git not found; project roots fall back to configured/working directories")
   end

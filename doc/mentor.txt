@@ -5,10 +5,13 @@ INTRODUCTION                                                      *mentor.nvim*
 
 Mentor.nvim balances observation, coaching, and explicitly requested
 implementation. It is autonomous in understanding a project and deliberately
-restrained in modifying it. This build provides Coach chat with a fake
-offline provider, project identity, local storage, a shared access policy,
-and read-only investigation tools (files/buffers, Git state, diagnostics).
-Observer and Implement arrive in later milestones.
+restrained in modifying it. This build provides an interactive Coach that
+runs a bounded tool-calling loop against any OpenAI-compatible provider
+(streaming, native read-only tools, budgets, cancellation, request queuing),
+with conversations persisted locally per project, plus project identity,
+local storage, a shared access policy, and read-only investigation tools
+(files/buffers, Git state, diagnostics). Observer and Implement arrive in
+later milestones.
 
 Setup: >lua
 
@@ -29,16 +32,20 @@ Run `:checkhealth mentor` for actionable dependency and configuration reports.
 COMMANDS                                                        *mentor-commands*
 
 :MentorChat                 Open the Coach conversation window for the
-                            current project. In the buffer, edit a line
-                            starting with "> " and press <CR> to send it.
+                            current project. The transcript persists across
+                            restarts. In the buffer, edit a line starting
+                            with "> " and press <CR> to send it.
 
-:MentorChatAsk {question}   Ask Coach immediately.
+:MentorChatAsk {question}   Ask Coach immediately. Requests made while one
+                            is running queue automatically and run in
+                            order.
 
 :MentorStop                 Cancel running operations. Late results from a
-                            cancelled operation are never applied.
+                            cancelled operation are never applied. Queued
+                            requests keep their place.
 
 :MentorStatus               Show configuration, providers, project, storage,
-                            and active operations.
+                            usage totals, and active operations.
 
 ==============================================================================
 CONFIGURATION                                                *mentor-config*
@@ -54,6 +61,11 @@ context.exclusions       Additional glob patterns excluded from every
                          always excluded and cannot be re-allowed here.
 projects.external_dirs   Roots beyond the project root that file tools may
                          read. Empty by default.
+providers.default.*      endpoint, model, api_key_env, timeout_s,
+                         max_tokens (completion cap; raise it for reasoning
+                         models), capabilities = { tools, streaming }.
+chat.history_max_tokens  Conversation history sent with each request is
+                         trimmed oldest-first to this estimated budget.
 
 Local data lives in stdpath("data")/mentor; credentials are read from the
 environment at request time and are never stored.
@@ -79,6 +91,14 @@ Detected secrets (private-key blocks, known credential formats,
 credential-style assignments) in any tool result are redacted before the
 result is returned, logged, or stored. Detection is best effort; exclusions
 remain the primary protection. Tests use only synthetic secrets.
+
+Stored tool results carry their provenance and are re-authorized against
+the current access policy before every model request: results from a path
+that became excluded are withheld from later requests, never silently
+replayed. Coach transcripts are stored locally, sanitized, and only sent
+back to the configured provider. Each model request reserves its budget
+atomically before dispatch; limits (requests, tool calls, estimated tokens,
+wall-clock) are enforced up front and interrupted work stays accounted for.
 
 ==============================================================================
  vim:tw=78:ts=8:ft=help:norl:

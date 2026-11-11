@@ -89,6 +89,57 @@ function M.summaries()
   return out
 end
 
+local json_types = { string = "string", integer = "integer", boolean = "boolean" }
+
+---OpenAI native-tool schemas, names sorted for request determinism.
+---@param names string[]|nil subset to include (default: all)
+function M.schemas(names)
+  local allowed = nil
+  if names then
+    allowed = {}
+    for _, name in ipairs(names) do
+      allowed[name] = true
+    end
+  end
+  local sorted = {}
+  for name in pairs(M.tools) do
+    sorted[#sorted + 1] = name
+  end
+  table.sort(sorted)
+  local out = {}
+  for _, name in ipairs(sorted) do
+    if not allowed or allowed[name] then
+      local tool = M.tools[name]
+      local properties, required = {}, {}
+      local param_names = {}
+      for param in pairs(tool.params) do
+        param_names[#param_names + 1] = param
+      end
+      table.sort(param_names)
+      for _, param in ipairs(param_names) do
+        local typ = tool.params[param]
+        local base = typ:sub(-1) == "?" and typ:sub(1, -2) or typ
+        properties[param] = { type = json_types[base] or "string" }
+        if typ:sub(-1) ~= "?" then
+          required[#required + 1] = param
+        end
+      end
+      local parameters = { type = "object" }
+      if next(properties) then
+        parameters.properties = properties
+      end
+      if #required > 0 then
+        parameters.required = required
+      end
+      out[#out + 1] = {
+        type = "function",
+        ["function"] = { name = name, description = tool.summary, parameters = parameters },
+      }
+    end
+  end
+  return out
+end
+
 ---@param opts table {project}
 ---@return table operation context
 function M.new_operation(opts)

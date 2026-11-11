@@ -1,6 +1,6 @@
 # Architecture decisions
 
-Settled choices from the Milestone 1 spike and shell work. This document
+Settled choices from the Milestone 1 spike and the work since. This document
 records how the implementation is shaped and what is still provisional.
 
 ## Runtime decision: no separate worker (for now)
@@ -39,7 +39,18 @@ written against the 0.12 shape.
   never inside project repositories.
 - `journal_mode=WAL`, `foreign_keys=ON`, `busy_timeout=5000`.
 - Migrations: ordered `lua/mentor/storage/migrations/NNN_*.sql` applied inside
-  explicit transactions, tracked by `PRAGMA user_version`.
+  explicit transactions, tracked by `PRAGMA user_version`. Migration files are
+  discovered by globbing runtime paths: `nvim_get_runtime_file` returned a
+  stale match set for files added after startup on the tested build.
+- Conversations (migration 002): one linear Coach transcript per
+  (project, mode), stored sanitized; tool messages carry provenance so a
+  later policy change can withhold them.
+- Usage accounting: a model request first writes an atomic
+  `usage_reservation`; it becomes conservatively retained once the request
+  actually starts reaching the provider, and folds into daily totals with
+  the provider's reported numbers. A reservation that provably never
+  dispatched is released; a dispatched one is never undone — a crash leaves
+  it charged. Stale reservations are swept once per editor instance.
 - Callers only use scoped, parameterized repository methods
   (`lua/mentor/storage/records.lua`); no arbitrary query construction from
   feature code, and all FFI binding is positional (trailing nils bind NULL).
@@ -57,8 +68,15 @@ written against the 0.12 shape.
 - Incremental delivery via stdout callbacks; cancellation via process signal.
   Error classes are normalized to `cancelled | http_error | timeout |
   transport_error`.
-- Provider request construction (OpenAI-compatible Chat Completions, SSE
-  decoding, tool-call validation) is Milestone 3 on top of this transport.
+- `vim.system` callbacks run in libuv fast-event contexts, where VimL
+  functions and several API calls raise E5560. The transport keeps its own
+  callbacks minimal (byte buffering only) and re-delivers stdout chunks and
+  process exit through `vim.schedule`, so SSE parsing, agent dispatch, tool
+  execution, and UI writes always run on the main loop, in order.
+- The request body spool file is created with libuv calls only (never
+  `tempname`/`writefile`) for the same reason. In the curl config, the whole
+  `data-binary` value including the `@` must be quoted (`"@/path"`):
+  `@"path"` makes curl treat the quotes as part of the filename.
 
 ## Project identity
 
@@ -140,6 +158,50 @@ dependency), and Git calls are short bounded subprocesses; measured tool
 calls stay well inside the wall-clock budget, so no worker process is
 introduced yet.
 
+## Provider loop and budgets (Milestone 3)
+
+Provider adapter (`lua/mentor/provider/openai.lua`):
+
+- OpenAI-compatible Chat Completions only; anything else must fail clearly
+  with an actionable error rather than degrade silently. Capabilities
+  (native tools, streaming) are declared in configuration, never sniffed.
+- SSE is parsed by a standalone line accumulator (`provider/sse.lua`) that
+  survives arbitrary chunk boundaries (mid-line, mid-event, many events per
+  chunk, CRLF, keep-alive comments). Reasoning-model `reasoning_content`
+  deltas are counted but never rendered or stored.
+- Streamed tool-call fragments are accumulated by index and validated only
+  once complete; an incomplete or undecodable call is a hard
+  `malformed_response`, never executed. Accumulated bytes are capped per
+  request. Provider error bodies become classified errors
+  (`request_rejected` for deterministic request faults, which are not
+  retried; `http_error`/`timeout`/`transport_error` as transient).
+- Requests are serialized per endpoint by `scheduler.lua` (single-flight
+  FIFO): providers that serve one concurrent request never see two of ours;
+  queued requests start only when their slot comes up and can be cancelled
+  while still queued.
+
+Agent loop (`lua/mentor/agent.lua`):
+
+- Every model request is preceded by budget checks (model requests, tool
+  calls, estimated tokens, wall-clock deadline) and an atomic usage
+  reservation; limits come from configuration. One automatic retry per
+  operation for transient failures only.
+- Each stored tool result is re-authorized against the current policy
+  before every dispatch: newly excluded sources are replaced with a
+  withheld marker instead of replaying their content.
+- Tool results are capped per result and per operation, with an explicit
+  truncation marker the model can see.
+
+Coach UI (`lua/mentor/ui/chat.lua`):
+
+- The buffer is a view of the persisted transcript: on (re)opening, the
+  stored conversation renders from storage; streaming appends are dropped
+  once the operation is cancelled or its buffer/project binding no longer
+  holds. A turn interrupted mid-tool-call is repaired (dangling tool calls
+  stripped) when replaying history. Assistant messages are stored
+  sanitized; a request in flight plus a FIFO queue keep the interaction
+  responsive without refusing follow-ups.
+
 ## Chat window scoping
 
 Plugin windows retain their originating project binding
@@ -151,14 +213,16 @@ its buffer is valid.
 ## Module status
 
 Landed: `config`, `health`, `commands`, `project`, `policy`, `sanitize`,
-`context`, `storage/*`, `provider/{init,fake,transport}`, `tools/{init,
-files,git,lang}`, `ui/{chat,status}`, `plugin/mentor.lua`.
+`context`, `storage/*`, `provider/{init,fake,transport,sse,openai}`,
+`scheduler`, `agent`, `prompts/init`, `tools/{init,files,git,lang}`,
+`ui/{chat,status}`, `plugin/mentor.lua`.
 
 Not yet created (deliberate: modules are created when a milestone needs
-them): `snapshots`, `scheduler`, `budget`, `agent`, `modes/*`,
-`prompts/*`, `memory/*`, `ui/{observations,diff,memory}`.
+them): `snapshots`, `budget`, `modes/*`, `memory/*`, `ui/{observations,
+diff,memory}`.
 
-Known provisional gaps: Coach conversations are not yet persisted (next
-milestone), one-interactive-operation enforcement is per-chat-buffer
-(scheduler arrives with the provider loop), and the tools run
-synchronously under internal caps until async dispatch lands.
+Known provisional gaps: the tools run synchronously under internal caps
+until async dispatch proves necessary (measured live roundtrips stay well
+inside budgets); Coach keeps one linear conversation per project (threaded
+conversations and memory arrive with the memory milestone); one-interactive-
+operation enforcement is process-global.

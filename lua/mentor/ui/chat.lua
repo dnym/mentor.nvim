@@ -1,29 +1,191 @@
--- Persistent linear Coach conversation (MVP: one per project). Native scratch
--- buffer; streaming appends arrive asynchronously and are dropped if the
--- operation was cancelled or its buffer/project binding no longer holds.
+-- Persistent linear Coach conversation (MVP: one per project). The transcript
+-- lives in storage: opening Coach renders it, requests extend it, and it
+-- resumes intact after a restart. The buffer is just a view — streaming
+-- appends arrive asynchronously and are dropped if the operation was
+-- cancelled or its buffer/project binding no longer holds. Only one
+-- interactive operation runs per instance; additional explicit requests
+-- queue automatically in order.
 
 local project = require("mentor.project")
+local config = require("mentor.config")
+local records = require("mentor.storage.records")
+local sanitize = require("mentor.sanitize")
+local prompts = require("mentor.prompts")
 
 local M = {}
 
 local chat_buffers = {} -- project identity -> bufnr
 local ops = {} -- bufnr -> active operation
-
-M.provider = nil -- injectable for tests; defaults to fake in dev mode
+local active_op = nil -- the single running interactive operation
+local ask_queue = {} -- pending {buf, identity, text} in FIFO order
 
 local function chat_name(identity)
   return "mentor://coach/" .. identity:gsub("^/+", "")
 end
 
-local HEADER = {
-  "# Mentor Coach (offline shell; provider loop pending)",
-  "# Edit a line starting with '> ', press <CR> on it to send; :MentorChatAsk <text> also works.",
-  "# :MentorStop cancels a running request. Responses stream below.",
-  "",
-}
+local function header_lines()
+  local cfg = config.get()
+  local status
+  if cfg.dev.fake_provider then
+    status = "offline fake provider (dev.fake_provider)"
+  else
+    status = require("mentor.provider").describe("coach")
+  end
+  return {
+    "# Mentor Coach — transcript persists across restarts",
+    "# Edit a line starting with '> ', press <CR> on it to send; :MentorChatAsk <text> also works.",
+    "# :MentorStop cancels the running request; further requests queue automatically.",
+    "# provider: " .. status,
+    "",
+  }
+end
 
----The chat buffer for a project, created when missing. The buffer keeps its
----originating project binding so focus changes cannot retarget it.
+---Sanitized storage scope for a project identity.
+local function project_row_id(proj)
+  return records.projects.touch({
+    identity = proj.identity,
+    root = proj.root,
+    is_git = proj.is_git,
+    git_common_dir = proj.git_common_dir,
+  })
+end
+
+local function append_lines(buf, lines)
+  if not vim.api.nvim_buf_is_valid(buf) then
+    return
+  end
+  local last = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  vim.api.nvim_buf_set_lines(buf, #last, #last, false, lines)
+end
+
+---Render one persisted transcript row into display lines.
+---@param row table
+---@param tool_names table<string, string> call id -> tool name
+local function render_row(row, tool_names)
+  if row.role == "user" then
+    local out = {}
+    for _, line in ipairs(vim.split(row.content, "\n", { plain = true })) do
+      out[#out + 1] = "> " .. line
+    end
+    return out
+  end
+  if row.role == "assistant" then
+    local out = vim.split(row.content, "\n", { plain = true })
+    local calls = row.tool_calls and (pcall(vim.json.decode, row.tool_calls))
+    if type(calls) == "table" then
+      for _, call in ipairs(calls) do
+        tool_names[call.id] = call.name
+        out[#out + 1] = "⌁ called " .. call.name
+      end
+    end
+    return out
+  end
+  if row.role == "tool" then
+    local name = tool_names[row.tool_call_id] or "tool"
+    local note = "⌁ " .. name .. " result"
+    if row.source then
+      note = note .. " (" .. row.source .. ")"
+    end
+    return { note }
+  end
+  return {}
+end
+
+---Rebuild provider-format history from persisted rows, repairing any turn
+---that was interrupted before its tool results were stored.
+---@param rows table[]
+---@return table[]
+local function replay_messages(rows)
+  local out = {}
+  for _, row in ipairs(rows) do
+    if row.role == "user" then
+      out[#out + 1] = { role = "user", content = row.content }
+    elseif row.role == "assistant" then
+      local m = { role = "assistant", content = row.content or "" }
+      if row.tool_calls then
+        local ok, calls = pcall(vim.json.decode, row.tool_calls)
+        if ok and type(calls) == "table" and #calls > 0 then
+          m.tool_calls = {}
+          for _, call in ipairs(calls) do
+            m.tool_calls[#m.tool_calls + 1] = {
+              id = call.id,
+              type = "function",
+              ["function"] = { name = call.name, arguments = vim.json.encode(call.arguments or {}) },
+            }
+          end
+        end
+      end
+      out[#out + 1] = m
+    elseif row.role == "tool" then
+      out[#out + 1] = {
+        role = "tool",
+        tool_call_id = row.tool_call_id,
+        content = row.content,
+        source = row.source,
+      }
+    end
+  end
+  -- A crash between storing an assistant tool_calls turn and its tool
+  -- results would make the history invalid for the provider: strip the
+  -- dangling calls rather than rejecting the whole transcript.
+  for i, m in ipairs(out) do
+    if m.tool_calls then
+      for _, call in ipairs(m.tool_calls) do
+        local answered = false
+        for j = i + 1, #out do
+          if out[j].role == "tool" and out[j].tool_call_id == call.id then
+            answered = true
+            break
+          end
+        end
+        if not answered then
+          m.tool_calls = nil
+          break
+        end
+      end
+    end
+  end
+  return out
+end
+
+local function estimate_messages(messages)
+  local bytes = 0
+  for _, m in ipairs(messages) do
+    bytes = bytes + #(m.content or "")
+    if m.tool_calls then
+      bytes = bytes + #vim.json.encode(m.tool_calls)
+    end
+  end
+  return math.ceil(bytes / 4) + 64 * #messages
+end
+
+---Trim history oldest-first to the configured conversation budget.
+---@param system string
+---@param history table[]
+---@return table[] messages ready for the provider
+local function build_request_messages(system, history)
+  local cap = config.get().chat.history_max_tokens
+  local first = 1
+  local function fits(start)
+    local combined = { { role = "system", content = system } }
+    for i = start, #history do
+      combined[#combined + 1] = history[i]
+    end
+    return estimate_messages(combined) <= cap
+  end
+  -- Always keep at least the newest turn.
+  while first < #history and not fits(first) do
+    first = first + 1
+  end
+  local messages = { { role = "system", content = system } }
+  for i = first, #history do
+    messages[#messages + 1] = history[i]
+  end
+  return messages
+end
+
+---The chat buffer for a project, created when missing (rendering any
+---persisted transcript) and kept bound to its originating project.
 ---@param proj mentor.Project
 function M.buffer_for(proj)
   local existing = chat_buffers[proj.identity]
@@ -32,10 +194,10 @@ function M.buffer_for(proj)
   end
   local name = chat_name(proj.identity)
   local buf = vim.fn.bufnr(name)
-  if buf == -1 then
+  local fresh = buf == -1
+  if fresh then
     buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_name(buf, name)
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, HEADER)
   end
   vim.bo[buf].buftype = "nofile"
   vim.bo[buf].swapfile = false
@@ -43,6 +205,19 @@ function M.buffer_for(proj)
   vim.bo[buf].modifiable = true
   vim.b[buf].mentor_project = proj.identity
   vim.bo[buf].filetype = "mentorchat"
+
+  if fresh then
+    local lines = header_lines()
+    local rows = records.conversations.load(project_row_id(proj), "coach")
+    local tool_names = {}
+    for _, row in ipairs(rows) do
+      for _, line in ipairs(render_row(row, tool_names)) do
+        lines[#lines + 1] = line
+      end
+      lines[#lines + 1] = ""
+    end
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  end
 
   vim.api.nvim_buf_set_keymap(buf, "n", "<CR>", "", {
     noremap = true,
@@ -58,8 +233,13 @@ function M.buffer_for(proj)
     buffer = buf,
     group = "mentor",
     callback = function()
+      for i = #ask_queue, 1, -1 do
+        if ask_queue[i].buf == buf then
+          table.remove(ask_queue, i)
+        end
+      end
       local op = ops[buf]
-      if op and op.handle then
+      if op then
         op.cancelled = true
         op.handle:cancel()
       end
@@ -74,8 +254,7 @@ end
 ---Opens (or focuses) the Coach window for the current project.
 ---@return integer|nil bufnr, string|nil actionable error
 function M.open()
-  local cfg = require("mentor.config")
-  if not cfg.is_valid() then
+  if not config.is_valid() then
     return nil, "mentor.nvim: configuration is invalid; run :checkhealth mentor"
   end
   local proj = project.ensure_current()
@@ -110,28 +289,147 @@ local function append_delta(buf, op, chunk)
   op.line_idx = op.line_idx + #replacement - 1
 end
 
-local function finish(buf, op, info)
-  if not op.cancelled and vim.api.nvim_buf_is_valid(buf) then
-    if info and info.ok and info.estimated_tokens then
-      local note = string.format("\n[fake provider, ~%d estimated tokens]", info.estimated_tokens)
-      local parts = vim.split(note, "\n", { plain = true })
-      local current = vim.api.nvim_buf_get_lines(buf, op.line_idx, op.line_idx + 1, false)[1] or ""
-      local replacement = { current .. parts[1] }
-      for i = 2, #parts do
-        replacement[#replacement + 1] = parts[i]
-      end
-      vim.api.nvim_buf_set_lines(buf, op.line_idx, op.line_idx + 1, false, replacement)
-      op.line_idx = op.line_idx + #replacement - 1
+---Insert a note line at the current write position (tool activity, notices).
+local function insert_note(buf, op, text)
+  if op.cancelled or not vim.api.nvim_buf_is_valid(buf) or ops[buf] ~= op then
+    return
+  end
+  local current = vim.api.nvim_buf_get_lines(buf, op.line_idx, op.line_idx + 1, false)[1] or ""
+  local parts = vim.split(text, "\n", { plain = true })
+  local block = {}
+  if current ~= "" then
+    block[#block + 1] = current
+  end
+  for _, p in ipairs(parts) do
+    block[#block + 1] = p
+  end
+  block[#block + 1] = ""
+  vim.api.nvim_buf_set_lines(buf, op.line_idx, op.line_idx + 1, false, block)
+  op.line_idx = op.line_idx + #block - 1
+end
+
+local function pump_queue()
+  if active_op then
+    return
+  end
+  local item = table.remove(ask_queue, 1)
+  if not item then
+    return
+  end
+  if not vim.api.nvim_buf_is_valid(item.buf) then
+    return pump_queue()
+  end
+  local proj = project.for_dir(item.identity)
+  if not proj or proj.identity ~= item.identity then
+    return pump_queue()
+  end
+
+  local buf = item.buf
+  -- Locate the blank line under this ask's user line (line indices shift
+  -- while earlier operations stream, so resolve it at pump time).
+  local view = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local marker = "> " .. item.text
+  local stream_at = #view
+  for i = #view, 1, -1 do
+    if view[i] == marker then
+      stream_at = i
+      break
     end
-    vim.api.nvim_buf_set_lines(buf, op.line_idx, op.line_idx, false, { "" })
-    op.line_idx = op.line_idx + 1
   end
-  if ops[buf] == op then
-    ops[buf] = nil
+  if stream_at >= #view then
+    vim.api.nvim_buf_set_lines(buf, #view, #view, false, { "" })
   end
+  local op = { line_idx = stream_at, cancelled = false, handle = nil, project = item.identity }
+  ops[buf] = op
+  active_op = op
+
+  local row_id = project_row_id(proj)
+  local rows = records.conversations.load(row_id, "coach")
+  local history = replay_messages(rows)
+  local messages = build_request_messages(prompts.coach_system(proj), history)
+
+  local function note(text)
+    insert_note(buf, op, text)
+  end
+
+  local handle, run_err = require("mentor.agent").run({
+    mode = "coach",
+    project = proj,
+    messages = messages,
+    on_delta = function(chunk)
+      append_delta(buf, op, chunk)
+    end,
+    on_tool = function(phase, call)
+      if phase ~= "done" then
+        return
+      end
+      local line = "⌁ " .. call.name
+      if call.arguments and call.arguments.path then
+        line = line .. " " .. call.arguments.path
+      end
+      note(line)
+    end,
+    on_note = note,
+    on_message = function(msg)
+      -- The provider already saw it unsanitized; storage and the buffer view
+      -- keep the sanitized copy so pasted credentials never persist.
+      local clean = vim.deepcopy(msg)
+      clean.content = sanitize.sanitize(msg.content or "")
+      records.conversations.append(row_id, "coach", clean)
+    end,
+    on_done = function(err, info)
+      active_op = nil
+      if not op.cancelled and vim.api.nvim_buf_is_valid(buf) then
+        if err == "cancelled" then
+          note("[cancelled]")
+        elseif err then
+          note("[error: " .. ((info and info.message) or err) .. "]")
+        elseif info and info.stop_reason and info.stop_reason ~= "stop" then
+          note("[stopped: " .. info.stop_reason .. "]")
+        end
+        if info and info.usage and info.usage.model_requests and info.usage.model_requests > 0 then
+          local u = info.usage
+          local reported = u.reported_input + u.reported_output
+          local note_text = string.format(
+            "[%d model request(s), %d tool call(s), ~%d est tokens",
+            u.model_requests,
+            u.tool_calls,
+            u.estimated_tokens
+          )
+          if reported > 0 then
+            note_text = note_text
+              .. string.format(", provider reported %d/%d]", u.reported_input, u.reported_output)
+          else
+            note_text = note_text .. "]"
+          end
+          note(note_text)
+        end
+        if vim.api.nvim_buf_is_valid(buf) then
+          append_lines(buf, { "" })
+        end
+      end
+      if ops[buf] == op then
+        ops[buf] = nil
+      end
+      pump_queue()
+    end,
+  })
+
+  if not handle then
+    active_op = nil
+    if ops[buf] == op then
+      ops[buf] = nil
+    end
+    if vim.api.nvim_buf_is_valid(buf) then
+      append_lines(buf, { "[error: " .. tostring(run_err) .. "]", "" })
+    end
+    return
+  end
+  op.handle = handle
 end
 
 ---Sends one interactive Coach request bound to the chat buffer's project.
+---Additional requests while one is running queue automatically.
 ---@param text string
 ---@return boolean ok, string|nil actionable error
 function M.ask(text)
@@ -139,9 +437,12 @@ function M.ask(text)
   if text == "" then
     return false, "mentor.nvim: empty request"
   end
-  local cfg = require("mentor.config")
-  if not cfg.is_valid() then
+  if not config.is_valid() then
     return false, "mentor.nvim: configuration is invalid; run :checkhealth mentor"
+  end
+  local missing = require("mentor.provider").missing("coach")
+  if missing then
+    return false, missing
   end
   -- Prefer the chat buffer when the caller is already in one; otherwise open.
   local buf = vim.api.nvim_win_get_buf(0)
@@ -159,52 +460,31 @@ function M.ask(text)
     return false, "mentor.nvim: the chat buffer's project is no longer resolvable; reopen Coach"
   end
 
-  if ops[buf] then
-    return false, "mentor.nvim: a Coach request is already running; :MentorStop cancels it"
-  end
+  -- Sanitize before anything is stored or sent: user text may paste secrets.
+  local clean = sanitize.sanitize(text)
 
-  local provider ---@type table
-  if cfg.get().dev.fake_provider then
-    provider = require("mentor.provider.fake")
-  else
-    local provider_mod = require("mentor.provider")
-    local missing = provider_mod.missing("coach")
-    if missing then
-      return false, missing
-    end
-    return false,
-      "mentor.nvim: the OpenAI-compatible request loop lands in Milestone 3; set dev.fake_provider = true to exercise Coach offline meanwhile"
-  end
-  if M.provider then
-    provider = M.provider
-  end
+  records.conversations.append(project_row_id(proj), "coach", { role = "user", content = clean })
 
-  -- One interactive operation per instance; refuse politely.
-  for _, op in pairs(ops) do
-    if op ~= ops[buf] and op.handle and op.handle:is_active() then
-      return false, "mentor.nvim: an interactive operation is already running; :MentorStop cancels it"
-    end
-  end
-
+  local queued = active_op ~= nil
   local last = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local start = #last
-  vim.api.nvim_buf_set_lines(buf, start, start, false, { "> " .. text, "", "" })
-  local op = { line_idx = start + 2, cancelled = false, handle = nil, project = identity }
-  ops[buf] = op
+  vim.api.nvim_buf_set_lines(buf, start, start, false, { "> " .. clean, "" })
+  if queued then
+    vim.api.nvim_buf_set_lines(buf, start + 1, start + 1, false, { "[queued]" })
+  end
 
-  op.handle = provider.request({
-    text = text,
-    on_delta = function(chunk)
-      append_delta(buf, op, chunk)
-    end,
-    on_done = function(info)
-      finish(buf, op, info)
-    end,
-  })
+  ask_queue[#ask_queue + 1] = {
+    buf = buf,
+    identity = identity,
+    text = clean,
+    start_line = start + (queued and 2 or 1),
+  }
+  pump_queue()
   return true
 end
 
----Cancels active Coach operations. Returns the number cancelled.
+---Cancels the running Coach operation (queued requests keep their place).
+---Returns the number cancelled.
 function M.stop()
   local n = 0
   for _, op in pairs(ops) do
@@ -228,6 +508,11 @@ function M.active_count()
   return n
 end
 
+---Queued request count (status display).
+function M.queued_count()
+  return #ask_queue
+end
+
 function M.reset()
   for _, op in pairs(ops) do
     if op.handle then
@@ -236,6 +521,8 @@ function M.reset()
     end
   end
   ops = {}
+  ask_queue = {}
+  active_op = nil
   chat_buffers = {}
 end
 

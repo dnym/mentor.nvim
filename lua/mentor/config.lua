@@ -62,6 +62,7 @@ function M.defaults()
         model = "",
         api_key_env = "MENTOR_API_KEY", -- credential read from environment, never stored
         timeout_s = 60,
+        max_tokens = 2048, -- completion cap; raise it for reasoning models
         capabilities = {
           tools = true, -- native tool calling is required for the MVP workflows
           streaming = true,
@@ -95,6 +96,11 @@ function M.defaults()
         requests_per_hour_per_project = 30,
         est_tokens_per_day_per_project = 100000,
       },
+    },
+    chat = {
+      -- Conversation history sent with each Coach request is trimmed oldest
+      -- first to this estimated token budget.
+      history_max_tokens = 8000,
     },
     observer = {
       edit_idle_ms = 2000,
@@ -151,6 +157,7 @@ local function validate(cfg)
     check(errors, base .. ".model", p.model, is_str, "a string (empty for unset)")
     check(errors, base .. ".api_key_env", p.api_key_env, is_str, "an environment variable name")
     check(errors, base .. ".timeout_s", p.timeout_s, is_pos_num, "a positive number of seconds")
+    check(errors, base .. ".max_tokens", p.max_tokens, is_pos_int, "a positive integer of tokens")
     check(errors, base .. ".capabilities.tools", p.capabilities.tools, is_bool, "a boolean")
     check(errors, base .. ".capabilities.streaming", p.capabilities.streaming, is_bool, "a boolean")
     if p.endpoint ~= "" and not p.endpoint:match("^https?://") then
@@ -207,6 +214,8 @@ local function validate(cfg)
       end
     end
   end
+
+  check(errors, "chat.history_max_tokens", cfg.chat.history_max_tokens, is_pos_int, "a positive integer")
 
   for _, key in ipairs({
     "edit_idle_ms",

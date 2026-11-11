@@ -12,7 +12,10 @@ network access are required or used.
    where the project is headed next.
 2. Add meaningful checks with the change. Unit tests for
    pure logic; integration checks run against real buffers, SQLite, throwaway
-   Git repositories, and `file://`-based fake transport traffic.
+   Git repositories, and `file://`-based fake transport traffic. The
+   committed suite never touches the network; checks against a live
+   provider are kept in `tests/live/` and run only when explicitly
+   configured with a local endpoint (`make live-test`).
 3. Run:
 
    ```sh

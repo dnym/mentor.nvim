@@ -12,17 +12,31 @@ local function quote_config(value)
   return '"' .. value:gsub("\\", "\\\\"):gsub('"', '\\"') .. '"'
 end
 
----Escape a filesystem path for use inside a curl config file.
-local function quote_path(value)
-  return quote_config(value)
-end
-
 ---Returns nil when usable, or an actionable error.
 function M.check()
   if vim.fn.executable(M.executable) ~= 1 then
     return "mentor.nvim: transport requires the curl executable; install it (e.g. pacman -S curl)"
   end
   return nil
+end
+
+local spool_seq = 0
+
+---Unique spool file path built from libuv only: request() also runs from
+---libuv callbacks (chained agent dispatches), where VimL functions such as
+---tempname() are off-limits (E5560).
+local function spool_path()
+  spool_seq = spool_seq + 1
+  local ok, tmp = pcall(vim.uv.os_tmpdir)
+  local dir = (ok and type(tmp) == "string" and tmp ~= "") and tmp or (os.getenv("TMPDIR") or "/tmp")
+  return dir
+    .. "/mentor-spool-"
+    .. tostring(vim.uv.os_getpid())
+    .. "-"
+    .. tostring(vim.uv.now())
+    .. "-"
+    .. tostring(spool_seq)
+    .. ".body"
 end
 
 ---@class mentor.TransportRequest
@@ -48,11 +62,16 @@ function M.request(req)
     config_lines[#config_lines + 1] = "header = " .. quote_config(header)
   end
   if req.body ~= nil then
-    spool = vim.fn.tempname()
-    vim.fn.writefile({}, spool)
-    vim.uv.fs_chmod(spool, tonumber("600", 8))
-    vim.fn.writefile(vim.split(req.body, "\n", { plain = true }), spool)
-    config_lines[#config_lines + 1] = "data-binary = @" .. quote_path(spool)
+    spool = spool_path()
+    local fd = vim.uv.fs_open(spool, "w", tonumber("600", 8))
+    if not fd then
+      return nil, "mentor.nvim: could not create the request spool file"
+    end
+    vim.uv.fs_write(fd, req.body)
+    vim.uv.fs_close(fd)
+    -- The whole value (including the leading @) must be quoted: curl reads
+    -- @"/path" as a file path containing literal quote characters (exit 26).
+    config_lines[#config_lines + 1] = "data-binary = " .. quote_config("@" .. spool)
   end
   local method = req.method or (req.body ~= nil and "POST" or "GET")
   config_lines[#config_lines + 1] = "request = " .. quote_config(method)
@@ -77,6 +96,11 @@ function M.request(req)
     end
   end
 
+  -- vim.system callbacks run in libuv fast-event contexts, where VimL
+  -- functions and many API calls (buffer listing, tempname) are forbidden.
+  -- Everything downstream — SSE parsing, agent dispatch, tool execution,
+  -- UI writes — is delivered through the main loop instead. Scheduled
+  -- callbacks keep their FIFO order, so deltas precede on_exit.
   local ok, proc = pcall(vim.system, argv, {
     stdin = table.concat(config_lines, "\n") .. "\n",
     text = true,
@@ -86,7 +110,12 @@ function M.request(req)
         return
       end
       if req.on_delta then
-        req.on_delta(data)
+        local chunk = data
+        vim.schedule(function()
+          if not handle.cancelled and not done and req.on_delta then
+            req.on_delta(chunk)
+          end
+        end)
       end
     end,
     stderr = function(_, data)
@@ -102,18 +131,22 @@ function M.request(req)
     done = true
     handle.active = false
     cleanup()
+    local kind, code
+    if handle.cancelled then
+      kind, code = "cancelled", nil
+    elseif out.code == 22 then
+      kind, code = "http_error", out.code -- --fail-with-body on non-2xx
+    elseif out.code == 124 then
+      kind, code = "timeout", out.code
+    elseif out.code ~= 0 then
+      kind, code = "transport_error", out.code
+    else
+      kind, code = nil, out.code
+    end
     if req.on_exit then
-      if handle.cancelled then
-        req.on_exit("cancelled", nil)
-      elseif out.code == 22 then
-        req.on_exit("http_error", out.code) -- --fail-with-body on non-2xx
-      elseif out.code == 124 then
-        req.on_exit("timeout", out.code)
-      elseif out.code ~= 0 then
-        req.on_exit("transport_error", out.code)
-      else
-        req.on_exit(nil, out.code)
-      end
+      vim.schedule(function()
+        req.on_exit(kind, code)
+      end)
     end
   end)
   if not ok then

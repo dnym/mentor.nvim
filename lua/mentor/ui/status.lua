@@ -1,6 +1,5 @@
 -- Activity, configuration, and actionable failure display.
--- Renders into a native scratch buffer; usage accounting appears with the
--- Milestone 3 provider loop.
+-- Renders into a native scratch buffer.
 
 local M = {}
 
@@ -57,10 +56,26 @@ local function collect_lines()
   local active = chat.active_count()
   lines[#lines + 1] = "Active operations: "
     .. (active > 0 and tostring(active) .. " (Ctrl-C safe; :MentorStop cancels)" or "none")
+  local queued = chat.queued_count()
+  if queued > 0 then
+    lines[#lines + 1] = "Queued requests: " .. tostring(queued)
+  end
+
+  local records_mod = require("mentor.storage.records")
+  if proj and records_mod.projects.get(proj.identity) then
+    local row_id = records_mod.projects.get(proj.identity).id
+    local totals = records_mod.usage.totals(row_id, records_mod.usage.today(), "interactive")
+    lines[#lines + 1] = "Usage today (interactive, this project): "
+      .. totals.model_requests
+      .. " requests, ~"
+      .. totals.est_tokens
+      .. " est tokens"
+      .. (totals.open_reservations > 0 and (" (" .. totals.open_reservations .. " in flight)") or "")
+  end
   lines[#lines + 1] = ""
-  lines[#lines + 1] = "Current build: Coach runs against the fake provider when dev.fake_provider is set."
-  lines[#lines + 1] = "Safe context policy and read-only investigation tools are in place; the provider"
-  lines[#lines + 1] = "loop, Observer, memory, and budgets arrive in later milestones."
+  lines[#lines + 1] = "Coach runs the bounded tool-calling loop against the configured provider"
+  lines[#lines + 1] = "(or the offline fake provider when dev.fake_provider is set)."
+  lines[#lines + 1] = "Observer and shared memory arrive in later milestones."
   return lines
 end
 

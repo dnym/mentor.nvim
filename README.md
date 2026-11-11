@@ -3,13 +3,16 @@
 Learning-oriented AI assistance for Neovim: autonomous in understanding code,
 deliberately restrained in writing it.
 
-**Status: Milestone 2 — safe context and investigation tools.** Project
-identity, local SQLite storage, async transport plumbing, an interactive
-Coach scratch buffer driven by an offline fake provider, a shared access
-policy (path containment, exclusions, secret sanitization), and a read-only
-investigation tool set (files/buffers, Git, diagnostics) are in place.
-Automatic observation, persistent memory, operation budgets, and the real
-provider loop arrive in later milestones.
+**Status: Milestone 3 — Coach with a real provider loop.** Project
+identity, local SQLite storage, an async transport, an interactive Coach
+conversation driven end to end against any OpenAI-compatible provider
+(streaming responses, native read-only tool use, per-operation budgets,
+cancellation, automatic queuing against single-request endpoints), a shared
+access policy (path containment, exclusions, secret sanitization), and a
+read-only investigation tool set (files/buffers, Git, diagnostics) are in
+place. Coach transcripts persist locally and resume across restarts.
+Automatic observation, persistent memory, and the Implement workflow arrive
+in later milestones.
 
 Requires Neovim **v0.12.6+** on Arch/Arch-based systems (other Linux systems
 best effort).
@@ -55,6 +58,7 @@ require("mentor").setup({
       model = "some-tool-calling-model",
       api_key_env = "MENTOR_API_KEY",         -- read from environment, never stored
       timeout_s = 60,
+      max_tokens = 2048,   -- completion cap per request; raise it for reasoning models
       capabilities = { tools = true, streaming = true },
     },
     -- Per-mode overrides; any field may be set per mode:
@@ -76,6 +80,9 @@ require("mentor").setup({
     max_matches = 200,         -- matches returned per search
     max_elapsed_ms = 5000,     -- wall-clock bound per tool call
   },
+  chat = {
+    history_max_tokens = 8000, -- conversation history trimmed oldest-first
+  },
   dev = { fake_provider = false }, -- offline placeholder provider for UI work
 })
 ```
@@ -94,6 +101,8 @@ named, actionable errors.
 | `:MentorStatus` | Configuration, providers, storage, activity |
 
 In the Coach buffer, edit a line starting with `> ` and press `<CR>` to send.
+Requests made while one is running queue automatically and run in order;
+`:MentorStop` cancels the running request (queued ones keep their place).
 No global keymaps are imposed.
 
 ## Development
@@ -102,6 +111,8 @@ No global keymaps are imposed.
 make test   # deterministic headless checks
 make lint   # stylua check
 make fmt    # format
+make live-test  # optional live checks; requires MENTOR_LIVE_ENDPOINT and
+                # MENTOR_LIVE_MODEL, skipped otherwise (never in CI)
 ```
 
 See [docs/architecture.md](docs/architecture.md) for settled technical
@@ -125,3 +136,13 @@ decisions and [CONTRIBUTING.md](CONTRIBUTING.md) for conventions.
 - Investigation tools never write to project files; Git adapters are
   read-only views and are labeled as such (unsaved buffer edits are not
   part of Git results).
+- Coach conversations are stored locally (sanitized) and only ever sent
+  back to your configured provider; history is trimmed to a bounded token
+  budget.
+- Stored tool results are re-authorized against the current access policy
+  before every model request: a file excluded after the fact is withheld
+  from later requests even if it was read earlier in the same conversation.
+- Every model request first reserves its budget locally (atomic, crash-safe):
+  model-request, tool-call, token, and wall-clock limits are enforced before
+  dispatch, and an interrupted request stays accounted for rather than
+  invisible.

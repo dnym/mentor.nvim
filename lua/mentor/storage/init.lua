@@ -234,8 +234,15 @@ function M.transaction(fn)
 end
 
 ---Loads and applies pending migrations from bundled SQL files.
+---Uses an explicit glob over runtime paths: nvim_get_runtime_file showed a
+---stale match set for newly added .sql files on the tested Neovim build.
 local function migrate()
-  local files = vim.api.nvim_get_runtime_file("lua/mentor/storage/migrations/*.sql", false)
+  local files = {}
+  for _, root in ipairs(vim.api.nvim_list_runtime_paths()) do
+    for _, file in ipairs(vim.fn.glob(root .. "/lua/mentor/storage/migrations/*.sql", false, true)) do
+      files[#files + 1] = file
+    end
+  end
   table.sort(files)
   local current = tonumber(M.query("PRAGMA user_version;")[1].user_version) or 0
   for _, file in ipairs(files) do
