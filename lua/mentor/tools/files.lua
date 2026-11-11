@@ -431,13 +431,24 @@ function M.get_buffer(ctx, args)
     end
     buf = M.buffer_for_path(access.abspath)
     if not buf then
-      return { error = "no loaded buffer for that path" }
+      -- Errors come back to the model verbatim, so state the fix: read_file
+      -- already serves disk files (with loaded buffers taking precedence).
+      if vim.uv.fs_stat(access.abspath) then
+        return { error = "no loaded buffer for that path; use read_file to read this file" }
+      end
+      return {
+        error = "no loaded buffer for that path and no such file on disk; "
+          .. "check the path with list_directory or search_files, or use read_file for a real path",
+      }
     end
   else
-    return { error = "provide bufnr or path" }
+    return { error = "provide bufnr or path; to read a file from disk use read_file" }
   end
   if not vim.api.nvim_buf_is_valid(buf) or vim.fn.bufloaded(buf) ~= 1 then
-    return { error = "buffer is not valid or not loaded" }
+    return {
+      error = "buffer is not valid or not loaded (it may have been closed); "
+        .. "use read_file with the path instead",
+    }
   end
   if not ctx.tracker:same_project(buf) then
     return { error = "the buffer belongs to a different project" }

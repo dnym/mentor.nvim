@@ -80,6 +80,8 @@ function M.coach_system(proj)
     "",
     "Investigation tools (read-only, scoped to the authorized workspace):",
     table.concat(tool_lines, "\n"),
+    "- For paths, read with read_file (it already sees unsaved buffer state);",
+    "  use get_buffer only for editor buffers identified by number.",
     "",
     "Memory tools:",
     table.concat(memory_lines, "\n"),

@@ -98,7 +98,8 @@ return function()
       end,
       on_tool = function(phase, call, result)
         if phase == "done" then
-          got.tools[#got.tools + 1] = { name = call.name, ok = result and result.ok }
+          got.tools[#got.tools + 1] =
+            { name = call.name, ok = result and result.ok, error = result and result.error }
         end
       end,
       on_done = function(err, info)
@@ -139,9 +140,32 @@ return function()
       run(proj, "Use your tools: list the project directory, read main.lua, then tell me what it prints.")
     H.eq(got.done.err, nil, "no error")
     H.ok(#got.tools >= 1, "at least one tool executed")
+    -- Model-side misuse (bad arguments, wrong tool choice, out-of-scope path)
+    -- is correct pipeline behavior and self-corrects via hint-bearing errors;
+    -- plugin-side breakage in the tool layer never is and must fail here.
+    local internal_failures = {
+      "tool failed:",
+      "tool produced no structured result",
+      "operation was cancelled",
+      "exceeded its time budget",
+    }
+    local succeeded = 0
     for _, tool in ipairs(got.tools) do
-      H.ok(tool.ok, "tool " .. tool.name .. " succeeded")
+      if tool.ok then
+        succeeded = succeeded + 1
+      else
+        local err = tool.error or ""
+        local internal = false
+        for _, sig in ipairs(internal_failures) do
+          if err:find(sig, 1, true) then
+            internal = true
+            break
+          end
+        end
+        H.ok(not internal, "tool " .. tool.name .. " failed inside the plugin: " .. err)
+      end
     end
+    H.ok(succeeded >= 1, "at least one tool call succeeded")
     H.contains_text((got.done.info.content or ""):lower(), "hello", "answer reflects tool output")
   end)
 

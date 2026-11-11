@@ -50,7 +50,8 @@ M.tools = {
     handler = files.search_content,
   },
   get_buffer = {
-    summary = "Read a live editor buffer by number or path",
+    summary = "Read a live editor buffer by number; for file paths prefer read_file, "
+      .. "which already returns loaded buffer contents",
     params = { bufnr = "integer?", path = "string?", from_line = "integer?", to_line = "integer?" },
     handler = files.get_buffer,
   },
