@@ -391,6 +391,24 @@ return function()
     local res = tools.run(ctx, "read_file", { path = "src/huge.lua" })
     H.ok(not res.ok, "oversized read refused")
     H.contains_text(res.error, "max_file_bytes", "names the limit")
+    H.contains_text(res.error, "from_line", "refusal offers the executable slice route")
+    local slice = tools.run(ctx, "read_file", { path = "src/huge.lua", from_line = 2, to_line = 4 })
+    H.ok(slice.ok, "explicit bounded slice of an oversized file is honored")
+    H.contains_text(slice.content, "filler line", "slice content present")
+    H.eq(slice.partial, true, "flagged as partial")
+    H.eq(slice.to_line, 4, "requested range echoed")
+    H.eq(
+      slice.content,
+      table.concat({
+        "-- filler line for the size limit test",
+        "-- filler line for the size limit test",
+        "-- filler line for the size limit test",
+      }, "\n"),
+      "exactly the requested lines"
+    )
+    local onesided = tools.run(ctx, "read_file", { path = "src/huge.lua", from_line = 2 })
+    H.ok(not onesided.ok, "one-sided range refused with the file still huge")
+    H.contains_text(onesided.error, "both from_line and to_line", "explains both bounds are required")
     local search = tools.run(ctx, "search_content", { query = "filler line" })
     H.ok(search.ok, "search survives the large file")
     H.ok(search.skipped.too_large >= 1, "large file counted in skips")

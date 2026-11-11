@@ -24,6 +24,66 @@ local function time_up(ctx)
   return vim.uv.now() - ctx.started_at >= ctx.limits.max_elapsed_ms
 end
 
+---Read lines [from, to] (1-based, inclusive) without loading the file whole:
+---streams fixed-size chunks, collects at most (to - from + 1) lines, and
+---stops early at max_bytes or the elapsed budget. Returns the joined text
+---and whether collection stopped early (byte or time stop).
+---@param path string
+---@param from integer
+---@param to integer
+---@param max_bytes integer
+---@param ctx table operation context
+---@return string|nil text, boolean stopped_early
+local function read_line_slice(path, from, to, max_bytes, ctx)
+  local fd = vim.uv.fs_open(path, "r", 420)
+  if not fd then
+    return nil, false
+  end
+  local wanted = to >= from and (to - from + 1) or 0
+  local lines, pending, lineno, bytes = {}, "", 1, 0
+  local stopped_early = false
+  local function push(text)
+    if lineno >= from and #lines < wanted then
+      lines[#lines + 1] = text
+      bytes = bytes + #text + 1
+    end
+    lineno = lineno + 1
+  end
+  while #lines < wanted and bytes < max_bytes do
+    local data = vim.uv.fs_read(fd, 65536, 0)
+    if not data or data == "" then
+      break
+    end
+    local buf = pending .. data
+    local pos = 1
+    while true do
+      local nl = buf:find("\n", pos, true)
+      if not nl then
+        pending = buf:sub(pos)
+        break
+      end
+      push(buf:sub(pos, nl - 1))
+      pos = nl + 1
+      if bytes >= max_bytes or #lines >= wanted then
+        pending = ""
+        break
+      end
+    end
+    if bytes >= max_bytes or #lines >= wanted then
+      break
+    end
+    if time_up(ctx) then
+      stopped_early = true
+      break
+    end
+  end
+  if not stopped_early and #lines < wanted and bytes < max_bytes and pending ~= "" then
+    push(pending) -- final line without a trailing newline
+  end
+  vim.uv.fs_close(fd)
+  return table.concat(lines, "\n"), stopped_early
+end
+
 ---Find a loaded buffer whose canonical path matches an authorized access.
 ---@param abspath string
 ---@return integer|nil
@@ -142,9 +202,40 @@ function M.read_file(ctx, args)
     return { error = "path is not a regular file; if it is a directory use list_directory" }
   end
   if not buf and stat.size > ctx.limits.max_file_bytes then
+    -- Above the whole-file cap an explicit, bounded range is honored: the
+    -- remedy named in an error message must be executable. The slice is
+    -- read server-side (line range), never the whole file.
+    if args.from_line ~= nil and args.to_line ~= nil then
+      if looks_binary(access.abspath) then
+        ctx.tracker:disk(access.abspath, stat)
+        return { path = access.rel, binary = true, skipped = true, size = stat.size }
+      end
+      local from = math.max(1, args.from_line)
+      local to = math.max(0, args.to_line)
+      local slice, stopped_early = read_line_slice(access.abspath, from, to, ctx.limits.max_output_bytes, ctx)
+      if slice == nil then
+        return { error = "file became unreadable" }
+      end
+      local truncated
+      slice, truncated = cap_text(slice, ctx.limits.max_output_bytes)
+      truncated = truncated or stopped_early
+      ctx.tracker:disk(access.abspath, stat)
+      return {
+        path = access.rel,
+        source = "disk",
+        unsaved = false,
+        from_line = from,
+        to_line = to,
+        content = slice,
+        truncated = truncated,
+        partial = true,
+        size = stat.size,
+      }
+    end
     return {
       error = string.format(
-        "file is %d bytes, above context.max_file_bytes (%d); narrow the request with from_line/to_line after listing, or inspect with search_content",
+        "file is %d bytes, above context.max_file_bytes (%d); to read a bounded slice supply "
+          .. "both from_line and to_line, or inspect with search_content",
         stat.size,
         ctx.limits.max_file_bytes
       ),

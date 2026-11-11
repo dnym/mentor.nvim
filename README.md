@@ -82,7 +82,7 @@ require("mentor").setup({
     -- path; * stays within a segment, ** crosses segments. Built-in
     -- credential defaults (.env, private keys, ...) are always excluded.
     exclusions = { "build", "**/generated/**" },
-    max_file_bytes = 262144,   -- files above this are not read
+    max_file_bytes = 262144,   -- above this, only an explicit from_line/to_line slice is read
     max_output_bytes = 16384,  -- per-result text cap
     max_search_files = 500,    -- files visited per content search
     max_matches = 200,         -- matches returned per search
