@@ -3,29 +3,35 @@
 Learning-oriented AI assistance for Neovim: autonomous in understanding code,
 deliberately restrained in writing it.
 
-**Status: Milestone 6 — automatic Observer with user-controlled feedback.**
-Project identity, local SQLite storage, an async transport, an interactive
-Coach conversation driven end to end against any OpenAI-compatible provider
-(streaming responses, native tool use, per-operation budgets, cancellation,
-automatic queuing against single-request endpoints), a shared access policy
-(path containment, exclusions, secret sanitization), read-only investigation
-tools (files/buffers, Git, diagnostics), and shared memory the assistant
-manages under strict user precedence are in place. Implement mode turns an
-explicitly selected range in one buffer into a previewed, explicitly accepted
-buffer edit (`:MentorImplement`). Memory entries keep revisions and
-provenance, are inspectable and editable as generated Markdown
-(`:MentorMemory`), support revert, reversible deletion, permanent erasure,
-and protection, and are re-authorized against the current access policy
-before every request. Coach transcripts persist locally and resume across
-restarts. The Observer — bounded background reviews of your recent changes —
-is off for every project until you explicitly enable it (`:MentorObserve`),
-and its findings are only ever advice: deduplicated, freshness-checked,
-rate-limited, and fully under your control (`:MentorObservations`).
+Mentor works with any OpenAI-compatible provider, hosted or local (llama.cpp,
+Ollama, …), and has three modes:
 
-Requires Neovim **v0.12.6+** on Arch/Arch-based systems (other Linux systems
-best effort).
+- **Coach** (`:MentorChat`) — a Socratic chat about your project. It reads
+  code with read-only tools (files, buffers, Git, diagnostics, LSP) and
+  prefers hints and questions over handing you finished solutions.
+- **Implement** (`:MentorImplement`) — the only way Mentor edits code: you
+  select a range, the model proposes replacement text for exactly that
+  range, you review a diff, and nothing changes until you accept.
+- **Observer** (`:MentorObserve`) — optional background review of your recent
+  changes. Off until you enable it per project; its findings are advice only.
+
+Mentor also keeps a **memory** of project decisions and your learning goals,
+which you can inspect and edit as Markdown (`:MentorMemory`). Conversations,
+memory, and findings are stored locally in SQLite.
+
+Requires Neovim **v0.12.6+**. Developed on Arch Linux; other Linux systems
+are best effort.
 
 ## Installation
+
+Built-in `vim.pack`:
+
+```lua
+vim.pack.add({ "https://github.com/dnym/mentor.nvim" })
+require("mentor").setup({
+  providers = { default = { endpoint = "http://127.0.0.1:8080/v1", model = "your-model" } },
+})
+```
 
 lazy.nvim:
 
@@ -33,269 +39,218 @@ lazy.nvim:
 {
   "dnym/mentor.nvim",
   config = function()
-    require("mentor").setup({})
+    require("mentor").setup({
+      providers = { default = { endpoint = "http://127.0.0.1:8080/v1", model = "your-model" } },
+    })
   end,
 }
 ```
 
-Manual / other managers: add `plugin/mentor.lua` to your startup and call
-`require("mentor").setup({})`.
+Other managers: put the plugin on your runtimepath and call
+`require("mentor").setup({...})`.
+
+Nothing talks to a model until an endpoint and model are configured. Run
+`:checkhealth mentor` to see what is missing, then `:MentorChat` to start.
 
 ## Dependencies
 
 | Dependency | Required | Purpose |
 |---|---|---|
-| Neovim ≥ v0.12.6 | yes | host (`pacman -S neovim`) |
-| `curl` | yes | HTTP transport subprocess (`pacman -S curl`) |
-| `sqlite` (shared lib) | yes | local storage via LuaJIT FFI (`pacman -S sqlite`) |
-| `git` | optional | project roots, status/diff/history tools |
-| LSP servers | optional | definition/reference lookup (tools degrade gracefully without) |
-
-Run `:checkhealth mentor` for an actionable report.
+| Neovim ≥ v0.12.6 | yes | host |
+| `curl` | yes | HTTP transport |
+| `sqlite` (shared library) | yes | local storage, via LuaJIT FFI |
+| `git` | optional | project roots; status, diff, and history tools |
+| LSP servers | optional | definition and reference lookup |
 
 ## Configuration
 
-All settings are optional; the defaults are the shipped values.
+Everything except the provider endpoint and model is optional. The values
+below are the defaults (the common ones; `lua/mentor/config.lua` lists all); invalid values are reported by name at `setup()`.
 
 ```lua
 require("mentor").setup({
   -- data_dir = vim.fn.stdpath("data") .. "/mentor",
   providers = {
     default = {
-      endpoint = "https://api.openai.com/v1", -- OpenAI-compatible base URL
-      model = "some-tool-calling-model",
-      api_key_env = "MENTOR_API_KEY",         -- read from environment, never stored
+      endpoint = "",                  -- OpenAI-compatible base URL, e.g. "http://127.0.0.1:8080/v1"
+      model = "",
+      api_key_env = "MENTOR_API_KEY", -- environment variable holding the key; never stored
       timeout_s = 60,
-      max_tokens = 2048,   -- completion cap per request; raise it for reasoning models
+      max_tokens = 2048,              -- completion cap; also caps reasoning tokens, so raise it for reasoning models
       capabilities = { tools = true, streaming = true },
     },
-    -- Per-mode overrides; any field may be set per mode:
-    -- observer = { endpoint = "http://127.0.0.1:11434/v1", model = "local-model" },
+    -- Any field can be overridden per mode:
+    -- observer = { endpoint = "http://127.0.0.1:11434/v1", model = "small-local-model" },
+    -- coach = {}, implement = {},
   },
   projects = {
-    -- external_dirs = { "~/work/shared-libs" }, -- roots beyond the project authorized for reading
-    -- fallback_root = "~/work/scratch",  -- explicit root for non-Git projects
+    -- external_dirs = { "~/work/shared-libs" }, -- extra roots Mentor may read
+    -- fallback_root = "~/work/scratch",          -- root for non-Git projects
   },
   context = {
-    -- Additional exclusion patterns for every context source (buffers,
-    -- traversal, searches, Git output). Patterns match a path segment or a
-    -- path; * stays within a segment, ** crosses segments. Built-in
-    -- credential defaults (.env, private keys, ...) are always excluded.
-    exclusions = { "build", "**/generated/**" },
-    max_file_bytes = 262144,   -- above this, only an explicit from_line/to_line slice is read
+    -- Extra exclusions for every context source (buffers, listings, searches,
+    -- Git output). Patterns match a path or path segment; * stays within a
+    -- segment, ** crosses segments. Credential files (.env, private keys, …)
+    -- are always excluded.
+    exclusions = {},
+    max_file_bytes = 262144,   -- larger files can only be read as explicit line ranges
     max_output_bytes = 16384,  -- per-result text cap
     max_search_files = 500,    -- files visited per content search
     max_matches = 200,         -- matches returned per search
-    max_elapsed_ms = 5000,     -- wall-clock bound per tool call
+    max_elapsed_ms = 5000,     -- time limit per tool call
+  },
+  limits = {
+    interactive = {            -- per Coach / Implement request
+      model_requests = 8,
+      tool_calls = 16,
+      elapsed_s = 120,
+      est_tokens = 32000,      -- estimated size cap for each model request
+    },
+    background = {             -- per Observer / consolidation pass
+      model_requests = 4,
+      tool_calls = 8,
+      elapsed_s = 60,
+      est_tokens = 16000,
+      requests_per_hour_per_project = 30,      -- shared across Neovim instances
+      est_tokens_per_day_per_project = 100000,
+    },
   },
   chat = {
-    history_max_tokens = 8000, -- conversation history trimmed oldest-first
+    history_max_tokens = 8000, -- Coach history is trimmed oldest-first to this
   },
   implement = {
-    context_lines = 30,        -- lines of surrounding context in the diff preview
-    max_target_bytes = 32768,  -- the selected range may not exceed this
+    context_lines = 30,            -- context lines in the diff preview
+    max_target_bytes = 32768,      -- largest selectable range
     max_replacement_bytes = 65536, -- larger proposals are refused
   },
   memory = {
-    recall_limit = 12,          -- entries injected into a request / searched
-    recall_max_bytes = 4096,    -- byte cap on the injected memory block
-    consolidate_max_entries = 60, -- candidates considered per memory or scheduled pass
-    view_max_entries = 300,     -- entries rendered in :MentorMemory
+    recall_limit = 12,            -- entries included in a request
+    recall_max_bytes = 4096,      -- size cap on included memory
+    consolidate_max_entries = 60, -- entries considered per merge pass
+    view_max_entries = 300,       -- entries shown in :MentorMemory
   },
   observer = {
-    edit_idle_ms = 2000,        -- automatic pass starts this long after the last edit
-    save_debounce_ms = 1000,    -- saves use this (shorter) debounce
-    notify_cooldown_ms = 600000, -- ten minutes before the same finding can interrupt again
-    notify_min_gap_ms = 60000,  -- at most one unsolicited notification per project per minute
-    category_snooze_ms = 1800000, -- "snooze category" duration (thirty minutes)
-    notify_learning = false,    -- learning findings stay list-only unless this is on
-    digest_total_bytes = 12288, -- byte cap on the change digest per pass
-    digest_file_bytes = 2048,   -- per-file cap inside the digest
-    list_max_items = 100,       -- findings rendered in :MentorObservations
+    edit_idle_ms = 2000,          -- review starts this long after your last edit
+    save_debounce_ms = 1000,      -- ... or this long after a save
+    notify_cooldown_ms = 600000,  -- before a dismissed finding may notify again
+    notify_min_gap_ms = 60000,    -- at most one notification per project per minute
+    category_snooze_ms = 1800000, -- "snooze category" duration
+    notify_learning = false,      -- learning findings stay in the list unless true
+    digest_total_bytes = 12288,   -- size cap on the change summary sent per pass
+    digest_file_bytes = 2048,     -- per-file cap inside it
+    list_max_items = 100,         -- findings shown in :MentorObservations
   },
   dev = { fake_provider = false }, -- offline placeholder provider for UI work
 })
 ```
 
-Investigation limits, notification cadence, and observation timing have
-conservative shipped defaults, validated at `setup()`; invalid values produce
-named, actionable errors.
-
 ## Commands
 
 | Command | Action |
 |---|---|
-| `:MentorChat` | Open the Coach conversation for the current project |
-| `:MentorChatAsk {question}` | Ask Coach immediately |
-| `:MentorChatClear` | Clear the Coach transcript for the current project (memory is untouched) |
-| `:MentorStop` | Cancel running operations (Coach, consolidation, Implement runs, observation passes) |
-| `:MentorStatus` | Configuration, providers, storage, activity, usage, memory and observation totals |
-| `:MentorObserve [enable\|disable\|pause\|resume\|review]` | Turn automatic observation on/off for this project (no argument toggles); `pause`/`resume` are session-only; `review` runs one explicit pass without enabling |
-| `:MentorObservations` | Open the observation list (dismiss, restore, rate, snooze, mute, Coach handoff) |
-| `:MentorExplain [id]` | Ask Coach to explain an observation (default: newest active) |
-| `:MentorImplement {instruction}` | Propose a bounded edit for a visual selection or the insertion point; opens a diff preview |
-| `:MentorImplementAccept [id]` | Apply the pending proposal (one `u` reverts it) |
-| `:MentorImplementReject [id]` | Reject the pending proposal (the buffer stays untouched) |
-| `:MentorMemory` | Open the memory view (generated Markdown) for the current project |
-| `:MentorMemory revert <id> [rev]` | Re-apply an entry's older revision (defaults to the previous one) |
-| `:MentorMemory delete <id>` | Reversible deletion (a tombstone suppresses automatic recreation) |
-| `:MentorMemory erase <id>` | Permanent erasure of the entry and its history (chat is untouched) |
-| `:MentorMemory protect <id> on\|off` | Release or re-apply user precedence over an entry |
-| `:MentorMemory consolidate` | Run one bounded merge pass over redundant entries |
+| `:MentorChat` | Open the Coach chat for the current project |
+| `:MentorChatAsk {question}` | Ask Coach directly |
+| `:MentorChatClear` | Clear the project's Coach transcript (memory is untouched) |
+| `:MentorStop` | Cancel everything running (chat, Implement, Observer, consolidation) |
+| `:MentorStatus` | Configuration, providers, storage, activity, and usage |
+| `:MentorImplement {instruction}` | Propose an edit for the visual selection (or insert at the cursor) |
+| `:MentorImplementAccept [id]` | Apply the pending proposal (one `u` undoes it) |
+| `:MentorImplementReject [id]` | Discard the pending proposal |
+| `:MentorObserve [enable\|disable\|pause\|resume\|review]` | Control automatic review for this project; no argument toggles, `pause`/`resume` last for this session, `review` runs one pass without enabling |
+| `:MentorObservations` | List findings (dismiss, rate, snooze, mute, explain) |
+| `:MentorExplain [id]` | Ask Coach to explain a finding (default: the newest) |
+| `:MentorMemory` | Open the editable memory view for the current project |
+| `:MentorMemory revert <id> [rev]` | Restore an entry's earlier revision (default: the previous one) |
+| `:MentorMemory delete <id>` | Delete an entry, reversibly |
+| `:MentorMemory erase <id>` | Permanently erase an entry and its history |
+| `:MentorMemory protect <id> on\|off` | Toggle whether the assistant may change an entry |
+| `:MentorMemory consolidate` | Merge redundant entries once |
 
-In the Coach buffer, edit a line starting with `> ` and press `<CR>` to send.
-Requests made while one is running queue automatically and run in order;
-`:MentorStop` cancels the running request (queued ones keep their place).
-No global keymaps are imposed.
+No global keymaps are set.
+
+## Coach
+
+`:MentorChat` opens a per-project chat buffer. Edit a line starting with
+`> ` and press `<CR>` on it to send. Requests made while one is running queue up and run in
+order, and the transcript persists across restarts. Coach investigates
+before answering, grounds its claims in code it has actually read, and
+escalates from hints to direct answers when you ask it to.
+
+## Implement
+
+Select a characterwise or linewise range (or place the cursor where text
+should go) and run `:MentorImplement {instruction}`. The target is fixed
+before the model runs: the model can read the project, but it can only
+submit replacement text for that one range. It cannot choose another file
+or widen the range.
+
+The proposal opens as a diff. `:MentorImplementAccept` applies it as a
+single undo step, but only if the buffer is unchanged since the proposal
+was made; any edit in between, even one you undid, invalidates it. Mentor
+never saves the buffer and never runs generated code. Blockwise selections
+and multi-file changes are not supported.
+
+## Observer
+
+The Observer reviews your recent changes in the background and points out
+things worth knowing: a call site your diff broke, a design trade-off,
+something worth learning. It is **off for every project** until you run
+`:MentorObserve enable`. The activation is tied to the Observer's endpoint,
+so changing providers turns it off again until you re-enable it.
+
+A review starts shortly after you stop editing or save, never while you are
+in Insert mode. Each pass sends a size-capped summary of your changes
+(diffs against HEAD plus unsaved buffers), with excluded files left out.
+Background passes have their own smaller budgets and hourly and daily caps,
+and they always yield to your interactive requests.
+
+Findings are deduplicated, and a finding whose code changed while the model
+was thinking is marked stale instead of notifying you. Notifications are
+deliberately rare: at most one per project per minute, none while you type,
+and none for praise or low-confidence design notes. `:MentorObservations` holds the
+full list, and `<CR>` on a finding hands it to Coach for an explanation.
 
 ## Memory
 
-The assistant records durable knowledge as entries in two scopes: *global*
-(general goals, explanation preferences) and *project* (architecture,
-decisions, conventions). Every entry keeps its revision history, origin,
-evidence references, and an uncertainty marker — the assistant's guesses
-about you stay marked as hypotheses unless you said them yourself.
+Mentor remembers durable knowledge in two scopes: *global* (your learning
+goals and explanation preferences) and *project* (architecture, decisions,
+conventions). Guesses the assistant makes about you are marked as hypotheses
+until you confirm them.
 
-`:MentorMemory` opens a generated Markdown view: edit an entry's summary or
-content and save to commit, add a `## [new]` block to create, remove a
-block to delete. Saves validate against the revisions the view was rendered
-at (another Neovim instance writing first produces an explicit conflict,
-never a silent merge), commit everything in one transaction, and regenerate
-the view. Your edits mark entries protected: the assistant cannot replace
-protected entries — at most it records a separate entry for you to
-reconcile. Erasure removes the entry and all its history, keeping only a
-content-free audit marker; the Coach transcript is cleared separately with
-`:MentorChatClear`.
+`:MentorMemory` opens the entries as Markdown. Edit an entry and save to
+commit, add a `## [new]` block to create one, or remove a block to delete
+it. Entries you edit become protected: the assistant can no longer change
+them, only add a separate note for you to reconcile. Every entry keeps its
+revision history; deletion is reversible, and erasure removes the entry and
+its history for good. While the Observer is enabled, redundant entries are
+merged at most once per project per day.
 
-## Implement mode
+## Privacy and safety
 
-Select a characterwise or linewise range (or place the cursor where text
-should be inserted) and run `:MentorImplement {instruction}`. The target is
-frozen before the model runs: one buffer, one range, that buffer's exact
-version. The model investigates with the same read-only tools Coach uses and
-can only submit replacement text for exactly that range — it cannot pick a
-file, move the target, or request more. Blockwise selections are refused
-with an explanation; whole-file, new-file, and multi-file changes are not
-offered.
-
-Each proposal opens a native diff preview (current vs proposed, with
-surrounding context). Nothing changes until you run
-`:MentorImplementAccept`; at that moment the target is revalidated — buffer
-identity, version, modifiability, and the current access policy. Any
-intervening edit invalidates the proposal, even an edit you later undid, and
-so does closing the buffer. Accepting applies exactly one buffer edit in a
-distinct undo block: one `u` reverts the whole application. The buffer is
-never saved by the plugin and generated code is never executed. Proposals
-live only in memory; `:MentorStop` cancels a run and withdraws its pending
-proposal.
-
-## Observation
-
-The Observer reviews your recent changes in the background and reports
-things worth knowing: a call site the diff broke, a design trade-off,
-something in the project it thinks you'd find worth learning. It is
-**off for every project until you explicitly enable it** with
-`:MentorObserve enable`, and the activation is stored together with the
-Observer provider's endpoint: change the endpoint and observation turns
-itself off until you re-enable it, so a new provider never starts seeing
-your code by accident. Enabling states once, plainly, what will be
-transmitted — including unsaved buffer content inside the access policy.
-
-Automatic passes start after an edit settles (idle debounce) or after a
-save (shorter debounce), never while you are in Insert mode, and each
-project keeps at most one pending pass that coalesces to your newest
-state. Every pass sees a change digest — diffs against HEAD plus the
-current state of modified buffers — capped in size and already filtered
-by the access policy (policy-excluded files are counted, never
-transmitted). Passes run on their own, tighter budgets than interactive
-work, including per-project hourly request and daily token caps shared
-across all your Neovim instances, and interactive requests always
-preempt background work. Explicit `:MentorObserve review` runs a pass on
-demand without turning anything on.
-
-Findings are advice, never actions — the Observer has no way to touch
-your code. Before anything is presented, each pass is revalidated: if
-your files, the checkout, or the access policy moved while the model was
-thinking, the result is marked stale instead of interrupting you.
-Findings deduplicate by issue kind and location; dismissing one makes a
-later re-confirmation wait out a ten-minute cooldown instead of nagging.
-Notifications follow a deliberately quiet policy (praise never
-interrupts, low-confidence design notes stay in the list, at most one
-unsolicited notification per project per minute, nothing while you are
-typing), and `:MentorObservations` puts the rest under your control:
-dismiss/restore, useful/not-useful rating, per-category snooze and mute,
-and `<CR>` for a Coach handoff (`:MentorExplain`) when you want the
-reasoning walked through.
-
-Observation also schedules memory consolidation: at most once per
-project per day, only while observation is enabled and redundant
-entries are actually pending — the same bounded pass
-`:MentorMemory consolidate` runs by hand, under the same protections.
+- No network requests at plugin load or in tests; Mentor only contacts the
+  endpoints you configure.
+- API keys come from the environment at request time. Keys and request
+  bodies never appear in process arguments, logs, or storage.
+- The model can only call a fixed set of read-only tools. It never runs
+  commands, and paths are confined to the project (symlink escapes and `..`
+  traversal are denied).
+- Credential files (`.env`, private keys, …) and your exclusions are hidden
+  from every tool, and detected secrets are redacted before anything is sent
+  or stored.
+- If you exclude a file after it was read, earlier results from it are
+  withheld from later requests instead of being sent again.
+- The only path from the model to your code is Implement, and every change
+  needs your explicit accept.
 
 ## Development
 
 ```sh
-make test   # deterministic headless checks
-make lint   # stylua check
-make fmt    # format
-make live-test  # optional live checks; requires MENTOR_LIVE_ENDPOINT and
-                # MENTOR_LIVE_MODEL, skipped otherwise (never in CI)
+make test       # headless test suite (no network)
+make lint       # stylua check
+make fmt        # format
+make live-test  # optional checks against a real endpoint; needs
+                # MENTOR_LIVE_ENDPOINT and MENTOR_LIVE_MODEL
 ```
 
-See [docs/architecture.md](docs/architecture.md) for settled technical
-decisions and [CONTRIBUTING.md](CONTRIBUTING.md) for conventions.
-
-## Privacy notes
-
-- No network requests are made at plugin load or in tests.
-- API credentials are read from the environment at request time and are kept
-  out of process arguments, logs, and stored records.
-- Request bodies (including unsaved buffer content) travel through protected
-  input, never the process argument list.
-- The model can only choose among fixed, read-only tools; it never selects
-  commands, flags, or shells. Path arguments are validated against resolved
-  containment — symlink escapes and traversal above the project root are
-  denied.
-- The only route from the model to your buffers is the Implement workflow:
-  a developer command fixes the target first, the model supplies replacement
-  text for exactly that range, and a separate explicit accept revalidates
-  and applies it. Coach is never even offered the proposal tool, and no tool
-  writes to disk.
-- Credential files (`.env`, private keys, …) and configured exclusions are
-  hidden from every context source: buffers, listings, searches, Git output,
-  and stored context. Detected secrets in tool results are redacted before
-  the result is returned, logged, or persisted.
-- Investigation tools never write to project files; Git adapters are
-  read-only views and are labeled as such (unsaved buffer edits are not
-  part of Git results).
-- Coach conversations are stored locally (sanitized) and only ever sent
-  back to your configured provider; history is trimmed to a bounded token
-  budget. Clearing them (`:MentorChatClear`) is a separate action from
-  memory erasure, and memory erasure never touches conversation material.
-- Memory writes go through a dedicated tool interface confined to memory
-  storage: the model cannot write files with it, entries are sanitized for
-  detected secrets before storage, and project knowledge stays in project
-  scope (global entries must not carry paths or project-identifying
-  details). What the assistant infers about you stays marked as a
-  hypothesis until you state it or verify it.
-- Memory entries carry provenance; entries sourced from a path that later
-  becomes excluded are withheld from retrieval and from replayed tool
-  results instead of being retransmitted.
-- Stored tool results are re-authorized against the current access policy
-  before every model request: a file excluded after the fact is withheld
-  from later requests even if it was read earlier in the same conversation.
-- Observation is opt-in per project and bound to the endpoint it was
-  enabled against: changing the provider endpoint disables it until
-  re-enabled, and enabling says once what will be transmitted. Its change
-  digest is policy-filtered before composition (excluded files are
-  counted, never sent) and size-capped; finding refs are re-authorized
-  against the current policy before publication, and a finding resting
-  on a newly excluded path is withheld entirely.
-- Background observation load is capped per project across all running
-  instances (hourly requests, daily estimated tokens) in local storage,
-  so several editors against one project cannot stack up provider load;
-  interactive requests always preempt background passes.
-- Every model request first reserves its budget locally (atomic, crash-safe):
-  model-request, tool-call, token, and wall-clock limits are enforced before
-  dispatch, and an interrupted request stays accounted for rather than
-  invisible.
+See [docs/architecture.md](docs/architecture.md) for design decisions and
+[CONTRIBUTING.md](CONTRIBUTING.md) for conventions.
