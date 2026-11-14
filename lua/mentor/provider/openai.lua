@@ -44,6 +44,35 @@ local function provider_error_message(body)
   return "the provider returned an error response"
 end
 
+-- HTTP statuses worth one automatic retry: timeouts, conflicts, rate
+-- limits, and server-side failures. Every other 4xx is deterministic.
+local TRANSIENT_STATUS = { [408] = true, [409] = true, [425] = true, [429] = true }
+
+---Whether an HTTP error response may succeed on retry. Uses the status
+---when curl reported one; otherwise falls back to the error body's type.
+---@param status integer|nil
+---@param error_type string|nil
+---@return boolean
+function M._http_error_is_transient(status, error_type)
+  if status then
+    return status >= 500 or TRANSIENT_STATUS[status] == true
+  end
+  return error_type ~= "invalid_request_error"
+end
+
+local function status_label(status)
+  return status and (" (HTTP " .. status .. ")") or ""
+end
+
+local function rejection_hint(status)
+  if status == 401 or status == 403 then
+    return " — check the API key (provider.api_key_env names the environment variable)"
+  elseif status == 404 then
+    return " — check provider.endpoint (an OpenAI-compatible base URL such as http://host:port/v1)"
+  end
+  return ""
+end
+
 ---An actionable message for curl-level transport failures. The exit code is
 ---curl's; the common ones name the likely cause and where to look.
 ---@param kind string "timeout" | "transport_error" | other class
@@ -354,11 +383,11 @@ function M.chat(req)
       end
       local handle, terr = M._transport.request({
         url = url,
-        headers = auth_headers(settings),
+        headers = auth_headers(settings, streaming),
         body = body,
         timeout_s = settings.timeout_s,
         on_delta = feed,
-        on_exit = function(kind, exit_code)
+        on_exit = function(kind, exit_code, http_status)
           if overflow then
             deliver("response_too_large", {
               message = string.format(
@@ -375,10 +404,19 @@ function M.chat(req)
           elseif kind == "http_error" then
             -- --fail-with-body delivers the provider's error body on stdout.
             local message, pkind = provider_error_message(collected)
-            if pkind == "invalid_request_error" then
-              deliver("request_rejected", { message = "provider rejected the request: " .. message })
+            if M._http_error_is_transient(http_status, pkind) then
+              deliver(
+                "http_error",
+                { message = "provider error" .. status_label(http_status) .. ": " .. message }
+              )
             else
-              deliver("http_error", { message = "provider error: " .. message })
+              deliver("request_rejected", {
+                message = "provider rejected the request"
+                  .. status_label(http_status)
+                  .. ": "
+                  .. message
+                  .. rejection_hint(http_status),
+              })
             end
           elseif kind ~= nil then
             deliver(kind, { message = transport_failure_message(kind, exit_code, settings) })

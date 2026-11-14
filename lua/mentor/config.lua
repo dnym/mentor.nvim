@@ -80,7 +80,7 @@ function M.defaults()
         model_requests = 8,
         tool_calls = 16,
         elapsed_s = 120,
-        est_tokens = 32000,
+        est_tokens = 32000, -- estimated size cap per model request (context + tools)
         tool_result_bytes = 16384,
         tool_total_bytes = 65536,
       },
@@ -90,7 +90,7 @@ function M.defaults()
         model_requests = 4,
         tool_calls = 8,
         elapsed_s = 60,
-        est_tokens = 16000,
+        est_tokens = 16000, -- estimated size cap per model request (context + tools)
         tool_result_bytes = 16384,
         tool_total_bytes = 65536,
         requests_per_hour_per_project = 30,
@@ -127,8 +127,8 @@ function M.defaults()
       notify_cooldown_ms = 600000, -- ten minutes per finding
       notify_min_gap_ms = 60000, -- at most one unsolicited notification per project per minute
       category_snooze_ms = 1800000, -- thirty minutes
-      -- Learning-category findings notify by default (they are usually the
-      -- least urgent; the observation list always shows them).
+      -- Learning-category findings stay list-only by default (they are
+      -- usually the least urgent); set true to be notified about them too.
       notify_learning = false,
       -- Byte caps on the change digest handed to the model at pass start.
       digest_total_bytes = 12288,

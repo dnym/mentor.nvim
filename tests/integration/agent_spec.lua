@@ -199,7 +199,7 @@ return function()
       limits = { interactive = { model_requests = 8, tool_calls = 16, est_tokens = 10 } },
     })
     local captured = run_operation(proj, { { content = "never dispatched" } })
-    H.contains_text(captured.done.info.stop_reason, "token budget", "budget explained")
+    H.contains_text(captured.done.info.stop_reason, "per-request budget", "budget explained")
     local totals =
       records.usage.totals(records.projects.get(proj.identity).id, records.usage.today(), "interactive")
     H.eq(totals.model_requests, 0, "nothing was dispatched or charged")
@@ -292,5 +292,52 @@ return function()
     H.eq(attempts, 1, "no retry on deterministic rejection")
     H.eq(captured.done.err, "request_rejected", "error surfaced")
     H.contains_text(captured.done.info.message, "bad model", "provider message carried")
+  end)
+
+  H.test("the token budget caps each request, not the cumulative context", function()
+    -- Each request reports 1500 input tokens: the cumulative spend passes the
+    -- 4000-token cap after three requests, but no single request comes close.
+    local proj = configure("per-request-budget", {
+      limits = { interactive = { model_requests = 8, tool_calls = 16, est_tokens = 4000 } },
+    })
+    local requests = 0
+    agent.provider = {
+      chat = function(req)
+        requests = requests + 1
+        local n = requests
+        vim.schedule(function()
+          req.on_start()
+          local usage = { input = 1500, output = 10 }
+          if n <= 3 then
+            req.on_done(nil, {
+              content = "",
+              usage = usage,
+              tool_calls = {
+                {
+                  id = "c" .. n,
+                  name = "read_file",
+                  arguments = { path = "main.lua" },
+                  raw = '{"path":"main.lua"}',
+                },
+              },
+            })
+          else
+            req.on_done(nil, { content = "done after four requests", finish_reason = "stop", usage = usage })
+          end
+        end)
+        return {
+          cancel = function() end,
+          is_active = function()
+            return false
+          end,
+        }
+      end,
+    }
+    local captured = run_operation(proj, {})
+    agent.provider = nil
+    H.eq(captured.done.err, nil, "no error")
+    H.eq(captured.done.info.stop_reason, "stop", "natural stop, not a budget stop")
+    H.eq(requests, 4, "all four requests ran")
+    H.ok(captured.done.info.usage.estimated_tokens > 4000, "cumulative spend exceeded the per-request cap")
   end)
 end

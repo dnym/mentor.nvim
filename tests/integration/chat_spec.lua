@@ -198,4 +198,123 @@ return function()
     H.eq(project.for_buf(chat_a).identity, project.canonical(dir_a), "A chat resolves to A")
     H.eq(project.for_buf(chat_b).identity, project.canonical(dir_b), "B chat resolves to B")
   end)
+
+  ---Every tool message must answer a call of the assistant turn it follows.
+  local function assert_tool_pairing(messages, label)
+    local open_ids = nil
+    for i, m in ipairs(messages) do
+      if m.role == "tool" then
+        H.ok(
+          open_ids and open_ids[m.tool_call_id],
+          label .. ": tool message " .. i .. " answers a preceding call"
+        )
+        if open_ids then
+          open_ids[m.tool_call_id] = nil
+        end
+      else
+        if open_ids then
+          H.eq(next(open_ids), nil, label .. ": every call before message " .. i .. " was answered")
+        end
+        open_ids = nil
+        if m.role == "assistant" and m.tool_calls then
+          open_ids = {}
+          for _, call in ipairs(m.tool_calls) do
+            open_ids[call.id] = true
+          end
+        end
+      end
+    end
+    if open_ids then
+      H.eq(next(open_ids), nil, label .. ": trailing calls answered")
+    end
+  end
+
+  H.test("a turn stopped mid tool batch replays as a valid history", function()
+    configure("midbatch")
+    mentor.setup({
+      dev = { fake_provider = true },
+      data_dir = fs.tmpdir() .. "/data-midbatch",
+      limits = { interactive = { tool_calls = 1 } },
+    })
+    edit_git_project("midbatchproj")
+    vim.cmd("MentorChat")
+    local call = { name = "read_file", arguments = { path = "main.lua" } }
+    fake.script({
+      {
+        content = "",
+        tool_calls = { call, { id = "fake_call_2", name = "read_file", arguments = { path = "main.lua" } } },
+      },
+      { content = "second answer" },
+    })
+    local real_chat = fake.chat
+    local sent
+    fake.chat = function(req)
+      sent = req.messages
+      return real_chat(req)
+    end
+    local ok, err = pcall(function()
+      chat.ask("first")
+      wait_until(function()
+        return chat.active_count() == 0 and chat.queued_count() == 0
+      end)
+      H.contains_text(chat_text(), "tool call limit", "first turn stopped mid-batch")
+      chat.ask("second")
+      wait_until(function()
+        return chat.active_count() == 0 and chat.queued_count() == 0
+      end)
+    end)
+    fake.chat = real_chat
+    H.ok(ok, tostring(err))
+    assert_tool_pairing(sent, "replayed history")
+    local kept = 0
+    for _, m in ipairs(sent) do
+      if m.role == "tool" then
+        kept = kept + 1
+      end
+    end
+    H.eq(kept, 1, "the answered call and its result are kept")
+    H.contains_text(chat_text(), "second answer", "follow-up succeeds")
+  end)
+
+  H.test("orphan tool messages and unanswered calls are dropped from replay", function()
+    local out = chat._pair_tool_messages({
+      { role = "user", content = "q" },
+      { role = "tool", tool_call_id = "x", content = "orphan" },
+      { role = "assistant", content = "", tool_calls = { { id = "a" }, { id = "b" } } },
+      { role = "tool", tool_call_id = "a", content = "ra" },
+      { role = "user", content = "q2" },
+      { role = "assistant", content = "", tool_calls = { { id = "c" } } },
+      { role = "assistant", content = "done" },
+    })
+    assert_tool_pairing(out, "paired")
+    H.eq(#out, 6, "orphan tool message removed")
+    H.eq(#out[2].tool_calls, 1, "unanswered call removed, answered call kept")
+    H.eq(out[5].tool_calls, nil, "fully unanswered call list removed")
+  end)
+
+  H.test("history trimming never separates tool calls from their results", function()
+    configure("trim")
+    mentor.setup({
+      dev = { fake_provider = true },
+      data_dir = fs.tmpdir() .. "/data-trim",
+      chat = { history_max_tokens = 400 },
+    })
+    local big = words("w", 120)
+    local history = {
+      { role = "user", content = big },
+      { role = "assistant", content = "", tool_calls = { { id = "a" } } },
+      { role = "tool", tool_call_id = "a", content = big },
+      { role = "assistant", content = big },
+      { role = "user", content = "latest question" },
+      { role = "assistant", content = "", tool_calls = { { id = "b" } } },
+      { role = "tool", tool_call_id = "b", content = "small" },
+    }
+    local out = chat._build_request_messages("sys", history)
+    H.eq(out[1].role, "system", "system prompt first")
+    H.eq(out[2].role, "user", "history starts at a user message")
+    H.eq(out[2].content, "latest question", "older turns trimmed")
+    assert_tool_pairing(out, "trimmed")
+    local tiny = chat._build_request_messages("sys", { history[1], history[2], history[3] })
+    H.eq(#tiny, 4, "the newest turn is always kept whole")
+  end)
 end

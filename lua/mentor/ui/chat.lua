@@ -134,24 +134,53 @@ local function replay_messages(rows, proj)
       }
     end
   end
-  -- A crash between storing an assistant tool_calls turn and its tool
-  -- results would make the history invalid for the provider: strip the
-  -- dangling calls rather than rejecting the whole transcript.
-  for i, m in ipairs(out) do
-    if m.tool_calls then
+  return M._pair_tool_messages(out)
+end
+
+---Providers require every assistant tool call to be answered by a tool
+---message directly after it, and every tool message to answer a call of the
+---assistant turn it follows. An operation stopped mid-batch (tool-call
+---limit, deadline, cancellation) or a crash leaves unanswered calls: keep
+---only the answered calls, and drop tool messages that answer nothing.
+---@param messages table[]
+---@return table[]
+function M._pair_tool_messages(messages)
+  local out = {}
+  local i = 1
+  while i <= #messages do
+    local m = messages[i]
+    if m.role == "assistant" and m.tool_calls then
+      local results, answered = {}, {}
+      local j = i + 1
+      while j <= #messages and messages[j].role == "tool" do
+        results[#results + 1] = messages[j]
+        answered[messages[j].tool_call_id or ""] = true
+        j = j + 1
+      end
+      local kept, kept_ids = {}, {}
       for _, call in ipairs(m.tool_calls) do
-        local answered = false
-        for j = i + 1, #out do
-          if out[j].role == "tool" and out[j].tool_call_id == call.id then
-            answered = true
-            break
-          end
-        end
-        if not answered then
-          m.tool_calls = nil
-          break
+        if call.id and answered[call.id] and not kept_ids[call.id] then
+          kept[#kept + 1] = call
+          kept_ids[call.id] = true
         end
       end
+      local copy = vim.tbl_extend("force", {}, m)
+      copy.tool_calls = #kept > 0 and kept or nil
+      out[#out + 1] = copy
+      if copy.tool_calls then
+        for _, result in ipairs(results) do
+          if kept_ids[result.tool_call_id] then
+            out[#out + 1] = result
+            kept_ids[result.tool_call_id] = nil -- one result per call
+          end
+        end
+      end
+      i = j
+    elseif m.role == "tool" then
+      i = i + 1 -- orphan: no assistant tool call precedes it
+    else
+      out[#out + 1] = m
+      i = i + 1
     end
   end
   return out
@@ -168,13 +197,20 @@ local function estimate_messages(messages)
   return math.ceil(bytes / 4) + 64 * #messages
 end
 
----Trim history oldest-first to the configured conversation budget.
+---Trim history oldest-first to the configured conversation budget. Cuts
+---only land on user messages, so an assistant tool-call turn is never
+---separated from its tool results.
 ---@param system string
 ---@param history table[]
 ---@return table[] messages ready for the provider
-local function build_request_messages(system, history)
+function M._build_request_messages(system, history)
   local cap = config.get().chat.history_max_tokens
-  local first = 1
+  local starts = {}
+  for i, m in ipairs(history) do
+    if m.role == "user" then
+      starts[#starts + 1] = i
+    end
+  end
   local function fits(start)
     local combined = { { role = "system", content = system } }
     for i = start, #history do
@@ -182,9 +218,13 @@ local function build_request_messages(system, history)
     end
     return estimate_messages(combined) <= cap
   end
-  -- Always keep at least the newest turn.
-  while first < #history and not fits(first) do
-    first = first + 1
+  -- Always keep at least the newest turn (the last user message onward).
+  local first = starts[#starts] or 1
+  for _, start in ipairs(starts) do
+    if fits(start) then
+      first = start
+      break
+    end
   end
   local messages = { { role = "system", content = system } }
   for i = first, #history do
@@ -192,6 +232,7 @@ local function build_request_messages(system, history)
   end
   return messages
 end
+local build_request_messages = M._build_request_messages
 
 ---The chat buffer for a project, created when missing (rendering any
 ---persisted transcript) and kept bound to its originating project.

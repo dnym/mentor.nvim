@@ -22,6 +22,19 @@ end
 
 local spool_seq = 0
 
+local STATUS_MARKER = "mentor_http_status=" -- no Lua pattern magic characters
+
+---The HTTP status curl reported through write-out, or nil (000 = none).
+---@param stderr string|nil
+---@return integer|nil
+function M._parse_status(stderr)
+  local code = tonumber((stderr or ""):match(STATUS_MARKER .. "(%d%d%d)"))
+  if code and code > 0 then
+    return code
+  end
+  return nil
+end
+
 ---Unique spool file path built from libuv only: request() also runs from
 ---libuv callbacks (chained agent dispatches), where VimL functions such as
 ---tempname() are off-limits (E5560).
@@ -46,7 +59,7 @@ end
 ---@field body string|nil request body
 ---@field timeout_s number|nil
 ---@field on_delta fun(chunk: string)|nil incremental response delivery
----@field on_exit fun(err: string|nil, exit_code integer|nil)|nil
+---@field on_exit fun(err: string|nil, exit_code integer|nil, http_status integer|nil)|nil
 
 ---@param req mentor.TransportRequest
 ---@return table handle with :cancel(), or nil + actionable error
@@ -75,6 +88,11 @@ function M.request(req)
   end
   local method = req.method or (req.body ~= nil and "POST" or "GET")
   config_lines[#config_lines + 1] = "request = " .. quote_config(method)
+  -- The HTTP status goes to stderr (stdout carries the response stream), so
+  -- callers can tell transient failures (429/5xx) from deterministic ones.
+  -- The write-out format (not the config parser) turns \n into a newline.
+  config_lines[#config_lines + 1] = "write-out = "
+    .. quote_config("%{stderr}\\n" .. STATUS_MARKER .. "%{http_code}\\n")
 
   local argv = {
     M.executable,
@@ -143,9 +161,10 @@ function M.request(req)
     else
       kind, code = nil, out.code
     end
+    local status = M._parse_status(handle.stderr_tail)
     if req.on_exit then
       vim.schedule(function()
-        req.on_exit(kind, code)
+        req.on_exit(kind, code, status)
       end)
     end
   end)

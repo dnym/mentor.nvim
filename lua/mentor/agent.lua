@@ -1,8 +1,11 @@
 -- Bounded agent loop shared by interactive modes.
 --
 -- Budgets come from configuration and are enforced before every dispatch:
--- model requests, tool calls, wall-clock deadline, and estimated tokens,
+-- model requests, tool calls, wall-clock deadline, and the estimated size of
+-- each request (`est_tokens`: conversation, tool results and tool schemas),
 -- plus per-result and aggregate tool-output caps with explicit truncation.
+-- The per-request cap times the request limit bounds an operation's total;
+-- the cumulative spend is still recorded for status and background caps.
 -- Each model request first reserves usage atomically in SQLite; the
 -- reservation becomes conservatively retained once the request starts
 -- reaching the provider and is only released while it is known that nothing
@@ -47,8 +50,8 @@ local TRANSIENT_ERRORS = { transport_error = true, timeout = true, http_error = 
 ---Coarse token estimate over serialized message content (chars / 4).
 ---@param messages table[]
 ---@return integer
-local function estimate(messages)
-  local bytes = 0
+local function estimate(messages, extra_bytes)
+  local bytes = extra_bytes or 0
   for _, m in ipairs(messages) do
     bytes = bytes + #(m.content or "")
     if m.tool_calls then
@@ -138,6 +141,8 @@ function M.run(opts)
     tool_ctx[key] = value
   end
   local tool_schemas = tools_mod.schemas(opts.tools)
+  -- Tool definitions travel with every request and count toward its size.
+  local schema_bytes = #tool_schemas > 0 and #vim.json.encode(tool_schemas) or 0
   local deadline = vim.uv.now() + limits.elapsed_s * 1000
   local day = records.usage.today()
 
@@ -380,10 +385,14 @@ function M.run(opts)
       end
     end
     recheck_stored_context()
-    local next_est = estimate(messages)
-    if est_spent + next_est > limits.est_tokens then
+    local next_est = estimate(messages, schema_bytes)
+    if next_est > limits.est_tokens then
       return stop_at_limit(
-        "estimated token budget (" .. limits.est_tokens .. " tokens) reached; ask a narrower question"
+        "estimated request size ("
+          .. next_est
+          .. " tokens) exceeds the per-request budget ("
+          .. limits.est_tokens
+          .. " tokens); ask a narrower question"
       )
     end
 

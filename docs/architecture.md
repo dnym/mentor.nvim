@@ -204,9 +204,17 @@ Provider adapter (`lua/mentor/provider/openai.lua`):
 Agent loop (`lua/mentor/agent.lua`):
 
 - Every model request is preceded by budget checks (model requests, tool
-  calls, estimated tokens, wall-clock deadline) and an atomic usage
-  reservation; limits come from configuration. One automatic retry per
-  operation for transient failures only.
+  calls, estimated request size including tool schemas, wall-clock
+  deadline) and an atomic usage reservation; limits come from
+  configuration. The token budget caps each request rather than the
+  cumulative context (which re-counts the whole history every round); the
+  request limit bounds the total. One automatic retry per operation for
+  transient failures only: transport errors, timeouts, and HTTP 408/409/
+  425/429/5xx (curl reports the status on stderr via write-out); other
+  4xx responses fail at once with a remedy.
+- Coach transcripts replay with tool calls paired to their results: calls
+  left unanswered by a mid-batch stop are dropped, orphan tool messages
+  are dropped, and history trimming cuts only at user messages.
 - Each stored tool result is re-authorized against the current policy
   before every dispatch: newly excluded sources are replaced with a
   withheld marker instead of replaying their content.

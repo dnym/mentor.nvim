@@ -104,4 +104,10 @@ return function()
       H.ok(not tostring(a):find("super-secret", 1, true), "secret absent from argv: " .. a)
     end
   end)
+
+  H.test("the HTTP status reported through write-out is parsed", function()
+    H.eq(transport._parse_status("curl: (22) error: 404\nmentor_http_status=404\n"), 404, "status found")
+    H.eq(transport._parse_status("curl: (7) failed\nmentor_http_status=000\n"), nil, "000 means none")
+    H.eq(transport._parse_status(nil), nil, "no stderr")
+  end)
 end

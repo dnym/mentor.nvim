@@ -354,4 +354,54 @@ return function()
       H.eq(done2, "malformed_response", "undecodable chunk")
     end)
   end)
+
+  H.test("HTTP errors retry only for transient statuses", function()
+    with_transport(function(transport)
+      local function outcome(n, status, body)
+        local done
+        openai.chat({
+          settings = base_settings({ endpoint = "http://status" .. n .. ".test/v1" }),
+          messages = { { role = "user", content = "go" } },
+          on_done = function(err, info)
+            done = { err = err, info = info }
+          end,
+        })
+        local entry = transport.requests[n]
+        for _, chunk in ipairs({ body }) do
+          entry.req.on_delta(chunk)
+        end
+        entry.settled = true
+        entry.handle.active = false
+        entry.req.on_exit("http_error", 22, status)
+        return done
+      end
+      local auth = outcome(1, 401, '{"error":{"type":"authentication_error","message":"bad key"}}')
+      H.eq(auth.err, "request_rejected", "401 is deterministic")
+      H.contains_text(auth.info.message, "HTTP 401", "status shown")
+      H.contains_text(auth.info.message, "api_key_env", "remedy named")
+      local missing = outcome(2, 404, '{"error":{"type":"not_found_error","message":"nope"}}')
+      H.eq(missing.err, "request_rejected", "404 is deterministic")
+      H.contains_text(missing.info.message, "provider.endpoint", "remedy named")
+      local overflow = outcome(3, 400, '{"error":{"type":"exceed_context_size_error","message":"too long"}}')
+      H.eq(overflow.err, "request_rejected", "400 is deterministic whatever its type")
+      H.eq(outcome(4, 429, '{"error":{"message":"slow down"}}').err, "http_error", "429 retries")
+      H.eq(outcome(5, 503, '{"error":{"message":"loading"}}').err, "http_error", "5xx retries")
+    end)
+  end)
+
+  H.test("streaming requests ask for an event stream", function()
+    with_transport(function(transport)
+      openai.chat({
+        settings = base_settings({ endpoint = "http://accept.test/v1" }),
+        messages = { { role = "user", content = "go" } },
+        on_done = function() end,
+      })
+      H.contains_text(
+        table.concat(transport.requests[1].req.headers, "\n"),
+        "Accept: text/event-stream",
+        "accept header"
+      )
+      transport.settle(1, {}, "cancelled")
+    end)
+  end)
 end
