@@ -16,6 +16,27 @@ return function()
     return data_dir
   end
 
+  H.test("sqlite loads by its versioned soname when the unversioned one is missing", function()
+    local tried = {}
+    -- Debian/Ubuntu without the -dev package: only libsqlite3.so.0 exists.
+    local lib = storage._load_sqlite(function(name)
+      tried[#tried + 1] = name
+      if name == "sqlite3" then
+        error("libsqlite3.so: cannot open shared object file")
+      end
+      return ffi.load(name)
+    end)
+    H.eq(tried, { "sqlite3", "libsqlite3.so.0" }, "the unversioned name first, then the soname")
+    H.ok(ffi.string(lib.sqlite3_libversion()) ~= "", "the fallback library is usable")
+
+    local ok, err = pcall(storage._load_sqlite, function(name)
+      error("missing " .. name)
+    end)
+    H.ok(not ok, "no library is an error")
+    H.contains_text(err, "missing sqlite3", "names the first attempt")
+    H.contains_text(err, "missing libsqlite3.so.0", "and the second")
+  end)
+
   H.test("first open creates the directory, schema, and migration version", function()
     local data_dir = fresh_storage()
     local handle = storage.db()

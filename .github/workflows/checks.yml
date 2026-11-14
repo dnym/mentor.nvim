@@ -12,22 +12,24 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install Neovim v0.12.6
+        # Unpacked outside the checkout, so `stylua --check .` sees only
+        # this repository.
         run: |
+          cd "$RUNNER_TEMP"
           curl -fsSLO https://github.com/neovim/neovim/releases/download/v0.12.6/nvim-linux-x86_64.tar.gz
           tar xzf nvim-linux-x86_64.tar.gz
-          echo "$PWD/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
       - name: Install stylua
         # Pinned: a new release can change formatting and fail lint with no
         # code change.
         run: |
+          cd "$RUNNER_TEMP"
           curl -fsSLO https://github.com/JohnnyMorganz/StyLua/releases/download/v2.6.0/stylua-linux-x86_64.zip
           mkdir -p "$HOME/.local/bin"
           unzip -o stylua-linux-x86_64.zip -d "$HOME/.local/bin"
           chmod +x "$HOME/.local/bin/stylua"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Versions
-        # No libsqlite3-dev: the plugin must load the runtime library's
-        # versioned soname, as on a stock Debian/Ubuntu install.
-        run: nvim --version | head -3 && stylua --version && ls /usr/lib/x86_64-linux-gnu/libsqlite3.so*
+        run: nvim --version | head -3 && stylua --version
       - run: make lint
       - run: make test

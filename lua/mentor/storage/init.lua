@@ -38,10 +38,11 @@ long long sqlite3_changes64(void*);
 
 -- "sqlite3" resolves to libsqlite3.so, which Debian and Ubuntu only ship in
 -- the -dev package; the runtime package has just the versioned soname.
-local function load_sqlite()
+local function load_sqlite(loader)
+  loader = loader or ffi.load
   local errors = {}
   for _, name in ipairs({ "sqlite3", "libsqlite3.so.0" }) do
-    local ok, loaded = pcall(ffi.load, name)
+    local ok, loaded = pcall(loader, name)
     if ok then
       return loaded
     end
@@ -61,6 +62,9 @@ local OPEN_FLAGS = 0x00000002 + 0x00000004 + 0x00800000
 local C_INTEGER, C_FLOAT, C_TEXT = 1, 2, 3
 
 local M = {}
+
+-- Test seam: the library lookup with an injectable loader.
+M._load_sqlite = load_sqlite
 
 -- Overridable for tests; production default bounds UI impact of lock waits.
 M.busy_timeout_ms = 5000
