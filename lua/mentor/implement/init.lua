@@ -118,12 +118,12 @@ function M._capture_target(proj, req)
   local mode, range
   if req.range == 0 then
     mode = "point"
-    -- Clamp the cursor into the buffer: shada-restored or stale cursor
-    -- positions can sit past the last line (headless builds have been seen
-    -- to report row == line count).
+    -- nvim_win_get_cursor rows are 1-based; ranges here are 0-based. Clamp
+    -- anyway: a stale cursor (e.g. restored from shada) can sit past the
+    -- last line.
     local cur = vim.api.nvim_win_get_cursor(0)
     local nlines = vim.api.nvim_buf_line_count(buf)
-    local row = math.max(0, math.min(cur[1], nlines - 1))
+    local row = math.max(0, math.min(cur[1] - 1, nlines - 1))
     local line = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ""
     local col = math.max(0, math.min(cur[2], #line))
     range = { row1 = row, col1 = col, row2 = row, col2 = col }

@@ -172,6 +172,37 @@ return function()
   -- Propose -> preview -> accept -> undo
   -- ---------------------------------------------------------------------
 
+  H.test("an insertion point lands at the cursor, not on the line below", function()
+    local proj = configure("point-row")
+    focus(proj)
+    local buf = vim.api.nvim_get_current_buf()
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "first", "second", "third" })
+    vim.cmd("normal! ggj0ll") -- line 2, on the "c" of "second"
+    local target = implement._capture_target(proj, { range = 0, line1 = 2, line2 = 2, vmode = "" })
+    H.eq(target.range.row1, 1, "cursor line 2 is 0-based row 1")
+    H.eq(target.range.col1, 2, "cursor column kept")
+
+    vim.cmd("normal! G$") -- last line, last column: must stay in bounds
+    target = implement._capture_target(proj, { range = 0, line1 = 3, line2 = 3, vmode = "" })
+    H.eq(target.range.row1, 2, "last line maps to the last row")
+
+    vim.cmd("normal! ggj0ll")
+    fake.script({
+      { content = "", tool_calls = { { name = "propose_edit", arguments = { replacement = "<HERE>" } } } },
+      { content = "ok" },
+    })
+    H.ok(implement.start("mark it", { range = 0, line1 = 2, line2 = 2, vmode = "" }), "run started")
+    vim.wait(5000, function()
+      return implement.pending_count() > 0 and implement.active_count() == 0
+    end, 5)
+    H.ok(implement.accept(), "accepted")
+    H.eq(
+      vim.api.nvim_buf_get_lines(buf, 0, -1, false),
+      { "first", "se<HERE>cond", "third" },
+      "text inserted at the cursor"
+    )
+  end)
+
   H.test("a proposal previews in diff buffers; accept applies it and one undo reverts", function()
     local proj = configure("accept")
     focus(proj)
