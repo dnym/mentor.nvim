@@ -87,6 +87,7 @@ require("mentor").setup({
     default = {
       endpoint = "http://127.0.0.1:8080/v1", -- your endpoint
       model = "your-model",
+      -- api_key_env = "MENTOR_API_KEY", -- hosted providers: the variable holding your key (export it before starting Neovim)
       max_tokens = 8192, -- room for whole functions (and reasoning, if your model reasons)
       timeout_s = 300,
     },
@@ -129,7 +130,8 @@ nvim src/http/ngx_http_core_module.h
 ```
 
 `:MentorStatus` should show the nginx clone as the project, with Git
-detected and your provider configured.
+detected and your provider configured. If your provider needs an API key,
+`:checkhealth mentor` also tells you whether it found one.
 
 ## 1. Tell Mentor how you want to learn
 

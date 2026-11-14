@@ -55,6 +55,22 @@ function M.missing(mode)
   return nil
 end
 
+---Whether a mode will send an API key, without ever exposing the key.
+---@param mode "observer"|"coach"|"implement"
+---@return {state: "disabled"|"set"|"unset", var: string, remote: boolean}
+function M.key_status(mode)
+  local p = M.settings(mode)
+  local var = p.api_key_env or ""
+  local state = "disabled"
+  if var ~= "" then
+    local value = vim.env[var]
+    state = (value ~= nil and value ~= "") and "set" or "unset"
+  end
+  -- HTTPS endpoints are usually hosted APIs that require a key; plain HTTP
+  -- is usually a local server that does not.
+  return { state = state, var = var, remote = p.endpoint:match("^https://") ~= nil }
+end
+
 ---Redacted description for status and health output: never include credentials.
 ---@param mode "observer"|"coach"|"implement"
 function M.describe(mode)

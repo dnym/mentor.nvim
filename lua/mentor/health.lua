@@ -3,6 +3,30 @@
 
 local M = {}
 
+---Report whether a mode sends an API key. The key itself is never shown.
+---@param mode string
+---@param key {state: string, var: string, remote: boolean}
+function M.report_key(mode, key)
+  if key.state == "set" then
+    vim.health.ok(mode .. " API key: found in $" .. key.var)
+  elseif key.state == "disabled" then
+    vim.health.info(mode .. " API key: none (api_key_env is empty); requests are sent without one")
+  else
+    local msg = string.format(
+      "%s API key: $%s is not set, so requests are sent without one. "
+        .. "Export it before starting Neovim if your provider needs a key, "
+        .. 'or set api_key_env = "" for this provider to silence this.',
+      mode,
+      key.var
+    )
+    if key.remote then
+      vim.health.warn(msg)
+    else
+      vim.health.info(msg)
+    end
+  end
+end
+
 function M.check()
   vim.health.start("mentor.nvim")
 
@@ -58,6 +82,7 @@ function M.check()
       vim.health.warn(missing)
     else
       vim.health.ok(mode .. " provider: " .. provider.describe(mode))
+      M.report_key(mode, provider.key_status(mode))
     end
   end
 
