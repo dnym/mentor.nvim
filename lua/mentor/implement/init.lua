@@ -456,8 +456,10 @@ end
 ---@return table|nil proposal applied
 ---@return string|nil err
 function M.accept(id_arg)
-  local id = id_arg and tonumber(id_arg) or nil
-  if id_arg and not id then
+  -- The command passes "" when no id is given: that means "the newest".
+  id_arg = id_arg and vim.trim(id_arg) or ""
+  local id = tonumber(id_arg)
+  if id_arg ~= "" and not id then
     return nil, "mentor.nvim: usage: :MentorImplementAccept [proposal-id]"
   end
   local p = find_pending(id)
@@ -511,8 +513,10 @@ end
 ---@return table|nil proposal rejected
 ---@return string|nil err
 function M.reject(id_arg)
-  local id = id_arg and tonumber(id_arg) or nil
-  if id_arg and not id then
+  -- The command passes "" when no id is given: that means "the newest".
+  id_arg = id_arg and vim.trim(id_arg) or ""
+  local id = tonumber(id_arg)
+  if id_arg ~= "" and not id then
     return nil, "mentor.nvim: usage: :MentorImplementReject [proposal-id]"
   end
   local p = find_pending(id)
@@ -636,6 +640,8 @@ function M.start(instruction, req)
             .. session.proposal_id
             .. " awaits your decision: :MentorImplementAccept or :MentorImplementReject"
         )
+      elseif info and info.stop_reason and info.stop_reason ~= "stop" then
+        session_note(session, "Stopped without producing a proposal: " .. info.stop_reason)
       else
         session_note(session, "Finished without producing a proposal.")
       end

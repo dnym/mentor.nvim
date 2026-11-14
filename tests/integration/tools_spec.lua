@@ -141,6 +141,12 @@ return function()
     H.ok(found_buffer, "unsaved buffer edit found")
     H.ok(found_disk, "disk file found")
 
+    -- a single file path (not loaded as a buffer) searches that file
+    local one = tools.run(ctx, "search_content", { query = "compute_total", path = "src/util.lua" })
+    H.ok(one.ok, "file-scoped search ok")
+    H.eq(one.files_searched, 1, "exactly the named file was searched")
+    H.ok(#one.matches > 0 and one.matches[1].path == "src/util.lua", "match reported with its path")
+
     -- content that only exists in excluded material is never surfaced
     for _, needle in ipairs({ "SUPER_SECRET", "NESTED-REPO-CONTENT", "EXTERNAL-SYMLINK-CONTENT" }) do
       local denied = tools.run(ctx, "search_content", { query = needle })
@@ -223,6 +229,15 @@ return function()
     local extra = tools.run(ctx, "read_file", { path = "src/app.lua", force = true })
     H.ok(not extra.ok, "unknown parameter rejected rather than ignored")
     H.contains_text(extra.error, "unknown parameter force", "named parameter")
+  end)
+
+  H.test("the per-call time budget restarts for every call, not once per operation", function()
+    local proj = setup("budget")
+    local ctx = ctx_for(proj)
+    -- Simulate a slow model: the operation started long before this call.
+    ctx.started_at = vim.uv.now() - (ctx.limits.max_elapsed_ms * 10)
+    local res = tools.run(ctx, "read_file", { path = "src/app.lua" })
+    H.ok(res.ok, "a call made late in a long operation still runs: " .. tostring(res.error))
   end)
 
   H.test("no investigation tool writes to project files", function()

@@ -435,6 +435,40 @@ function M.search_content(ctx, args)
     local function stop_here(reason)
       truncated, truncated_reason, stop = true, reason, true
     end
+    local function scan_file(file_rel)
+      if files_searched >= ctx.limits.max_search_files then
+        return stop_here("max_search_files")
+      end
+      if time_up(ctx) then
+        return stop_here("elapsed")
+      end
+      local file_access = ctx.policy:authorize(file_rel)
+      if not file_access or searched_paths[file_access.abspath] then
+        return
+      end
+      local stat = vim.uv.fs_stat(file_access.abspath)
+      if not stat then
+        return
+      end
+      if stat.size > ctx.limits.max_file_bytes then
+        skipped.too_large = skipped.too_large + 1
+      elseif looks_binary(file_access.abspath) then
+        skipped.binary = skipped.binary + 1
+      else
+        local lines = vim.fn.readfile(file_access.abspath)
+        if lines == nil then
+          skipped.unreadable = skipped.unreadable + 1
+        else
+          searched_paths[file_access.abspath] = true
+          files_searched = files_searched + 1
+          bytes_scanned = bytes_scanned + stat.size
+          ctx.tracker:disk(file_access.abspath, stat)
+          if scan_text({ path = file_access.rel, unsaved = false }, lines) then
+            return stop_here("max_matches")
+          end
+        end
+      end
+    end
     local function scan_dir(dir_rel)
       local dir_access = ctx.policy:authorize(dir_rel)
       if not dir_access then
@@ -464,41 +498,22 @@ function M.search_content(ctx, args)
         elseif typ == "directory" then
           stack[#stack + 1] = child_rel
         elseif typ == "file" then
-          if files_searched >= ctx.limits.max_search_files then
-            return stop_here("max_search_files")
-          end
-          if time_up(ctx) then
-            return stop_here("elapsed")
-          end
-          local file_access = ctx.policy:authorize(child_rel)
-          if file_access and not searched_paths[file_access.abspath] then
-            local stat = vim.uv.fs_stat(file_access.abspath)
-            if stat then
-              if stat.size > ctx.limits.max_file_bytes then
-                skipped.too_large = skipped.too_large + 1
-              elseif looks_binary(file_access.abspath) then
-                skipped.binary = skipped.binary + 1
-              else
-                local lines = vim.fn.readfile(file_access.abspath)
-                if lines == nil then
-                  skipped.unreadable = skipped.unreadable + 1
-                else
-                  searched_paths[file_access.abspath] = true
-                  files_searched = files_searched + 1
-                  bytes_scanned = bytes_scanned + stat.size
-                  ctx.tracker:disk(file_access.abspath, stat)
-                  if scan_text({ path = child_rel, unsaved = false }, lines) then
-                    return stop_here("max_matches")
-                  end
-                end
-              end
-            end
+          scan_file(child_rel)
+          if stop then
+            return
           end
         end
       end
     end
-    while #stack > 0 and not stop do
-      scan_dir(table.remove(stack))
+    -- A file path searches just that file; listing it as a directory would
+    -- silently find nothing and report a clean miss.
+    local root_stat = vim.uv.fs_stat(access.abspath)
+    if root_stat and root_stat.type == "file" then
+      scan_file(access.rel)
+    else
+      while #stack > 0 and not stop do
+        scan_dir(table.remove(stack))
+      end
     end
   end
 

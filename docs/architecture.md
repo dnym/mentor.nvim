@@ -192,8 +192,14 @@ Provider adapter (`lua/mentor/provider/openai.lua`):
   deltas are counted but never rendered or stored.
 - Streamed tool-call fragments are accumulated by index and validated only
   once complete; an incomplete or undecodable call is a hard
-  `malformed_response`, never executed. Accumulated bytes are capped per
-  request. Provider error bodies become classified errors
+  `malformed_response`, never executed. Each response is capped on what it
+  produced (decoded content, reasoning, and tool-call arguments; 512 KiB),
+  not on raw SSE bytes: servers such as llama.cpp wrap every token in a
+  few hundred bytes of framing, so a raw cap rejected ordinary multi-function
+  proposals. A much larger raw-stream guard (32 MiB) still stops endless
+  framing or keep-alives, and only a 64 KiB raw prefix is retained, for error
+  bodies. Non-streaming bodies are the payload and keep the raw cap.
+  Provider error bodies become classified errors
   (`request_rejected` for deterministic request faults, which are not
   retried; `http_error`/`timeout`/`transport_error` as transient).
 - Requests are serialized per endpoint by `scheduler.lua` (single-flight

@@ -22,8 +22,20 @@ local M = {}
 ---@private
 M._transport = transport
 
--- Hard cap on accumulated response bytes per request.
+-- Hard cap on what one response may produce: answer text, reasoning, and
+-- tool-call names/arguments (decoded). In streaming mode the SSE framing
+-- around each token (ids, timestamps, JSON keys; often 10-50x the token
+-- itself) does not count against it; for a non-streaming response the
+-- body is the payload, so the raw body is capped instead.
 M.max_response_bytes = 524288
+
+-- Separate guard on raw stream bytes, so a server that streams endless
+-- framing, keep-alives, or empty deltas still cannot run unbounded.
+M.max_stream_bytes = 33554432
+
+-- Streaming keeps at most this much raw text, for provider error bodies
+-- (which arrive on stdout with an HTTP error) and diagnostics.
+M.max_error_body_bytes = 65536
 
 ---Actionable message from an error body shaped like {"error":{"message":...}}.
 local function provider_error_message(body)
@@ -151,6 +163,7 @@ local function new_state()
   return {
     content_parts = {},
     content_bytes = 0,
+    payload_bytes = 0, -- content + reasoning + tool-call fragments, decoded
     tool_calls = {}, -- index -> {id, name, argument_parts}
     finish_reason = nil,
     usage = nil,
@@ -180,12 +193,16 @@ local function absorb_chunk(state, chunk, on_delta)
       if type(delta.content) == "string" and delta.content ~= "" then
         state.content_parts[#state.content_parts + 1] = delta.content
         state.content_bytes = state.content_bytes + #delta.content
+        state.payload_bytes = state.payload_bytes + #delta.content
         if on_delta then
           on_delta(delta.content)
         end
       end
       -- reasoning_content deltas exist on some models; the UI shows only
       -- answer content, so they are counted here and otherwise dropped.
+      if type(delta.reasoning_content) == "string" then
+        state.payload_bytes = state.payload_bytes + #delta.reasoning_content
+      end
       if type(delta.tool_calls) == "table" then
         for _, frag in ipairs(delta.tool_calls) do
           local idx = (tonumber(frag.index) or 0) + 1
@@ -200,9 +217,11 @@ local function absorb_chunk(state, chunk, on_delta)
           if type(frag["function"]) == "table" then
             if type(frag["function"].name) == "string" and frag["function"].name ~= "" then
               acc.name = frag["function"].name
+              state.payload_bytes = state.payload_bytes + #acc.name
             end
             if type(frag["function"].arguments) == "string" then
               acc.argument_parts[#acc.argument_parts + 1] = frag["function"].arguments
+              state.payload_bytes = state.payload_bytes + #frag["function"].arguments
             end
           end
         end
@@ -335,8 +354,9 @@ function M.chat(req)
     or nil
 
   local raw = {}
-  local raw_bytes = 0
-  local overflow = false
+  local raw_bytes = 0 -- every byte received
+  local kept_bytes = 0 -- bytes retained in `raw`
+  local overflow = nil -- message once a cap is exceeded
   local delivered = false
 
   local function deliver(err, info)
@@ -352,13 +372,36 @@ function M.chat(req)
       return
     end
     raw_bytes = raw_bytes + #chunk
-    if raw_bytes > M.max_response_bytes then
-      overflow = true
+    if not parser then
+      -- Non-streaming: the body is the payload and must be kept whole.
+      if raw_bytes > M.max_response_bytes then
+        overflow = string.format(
+          "provider response exceeded the %d KiB accumulation cap",
+          math.floor(M.max_response_bytes / 1024)
+        )
+        return
+      end
+      raw[#raw + 1] = chunk
       return
     end
-    raw[#raw + 1] = chunk
-    if parser then
-      parser:feed(chunk)
+    if raw_bytes > M.max_stream_bytes then
+      overflow = string.format(
+        "provider stream exceeded the %d KiB raw stream cap",
+        math.floor(M.max_stream_bytes / 1024)
+      )
+      return
+    end
+    if kept_bytes < M.max_error_body_bytes then
+      local piece = chunk:sub(1, M.max_error_body_bytes - kept_bytes)
+      raw[#raw + 1] = piece
+      kept_bytes = kept_bytes + #piece
+    end
+    parser:feed(chunk)
+    if state.payload_bytes > M.max_response_bytes then
+      overflow = string.format(
+        "provider response exceeded the %d KiB accumulation cap",
+        math.floor(M.max_response_bytes / 1024)
+      )
     end
   end
 
@@ -389,12 +432,7 @@ function M.chat(req)
         on_delta = feed,
         on_exit = function(kind, exit_code, http_status)
           if overflow then
-            deliver("response_too_large", {
-              message = string.format(
-                "provider response exceeded the %d KiB accumulation cap",
-                M.max_response_bytes / 1024
-              ),
-            })
+            deliver("response_too_large", { message = overflow })
             on_finish()
             return
           end

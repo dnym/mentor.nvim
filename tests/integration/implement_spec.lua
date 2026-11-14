@@ -356,6 +356,41 @@ return function()
     H.eq(implement.accept(), nil, "a rejected proposal cannot be applied")
   end)
 
+  H.test("a run stopped by a budget says which limit it hit", function()
+    local proj = configure("budget-note", { limits = { interactive = { model_requests = 1 } } })
+    focus(proj)
+    fake.script({
+      { content = "", tool_calls = { { name = "read_file", arguments = { path = "main.lua" } } } },
+      { content = "never reached" },
+    })
+    H.ok(implement.start("do it", { range = 1, line1 = 1, line2 = 1, vmode = "" }), "run started")
+    vim.wait(5000, function()
+      return implement.active_count() == 0
+    end, 5)
+    local run_buf = vim.fn.bufnr("mentor://implement-run/" .. proj.identity)
+    local text = table.concat(vim.api.nvim_buf_get_lines(run_buf, 0, -1, false), "\n")
+    H.contains_text(text, "model request limit", "the session note names the limit")
+  end)
+
+  H.test("the commands without an id act on the newest pending proposal", function()
+    local proj = configure("bare-commands")
+    focus(proj)
+    propose("-- first\n")
+    local buf = vim.fn.bufnr(proj.root .. "/main.lua")
+    local before = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+    -- User commands pass "" for a missing argument, not nil.
+    local rejected, rerr = implement.reject("")
+    H.ok(rejected, "bare reject works: " .. tostring(rerr))
+    H.eq(vim.api.nvim_buf_get_lines(buf, 0, -1, false), before, "reject left the buffer untouched")
+    focus(proj)
+    propose("-- second\n")
+    local applied, aerr = implement.accept("")
+    H.ok(applied, "bare accept works: " .. tostring(aerr))
+    H.eq(vim.api.nvim_buf_get_lines(buf, 0, 1, false)[1], "-- second", "the newest proposal was applied")
+    local _, uerr = implement.accept("abc")
+    H.contains_text(uerr, "usage", "a non-numeric id is still refused")
+  end)
+
   H.test("MentorStop cancels an implement run and withdraws its pending proposal", function()
     local proj = configure("stop")
     focus(proj)

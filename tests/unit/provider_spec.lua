@@ -224,19 +224,104 @@ return function()
     end)
   end)
 
-  H.test("accumulation caps stop runaway responses", function()
+  ---Start one chat and return a table that receives the terminal result.
+  local function start_chat(settings)
+    local done = {}
+    openai.chat({
+      settings = settings or base_settings(),
+      messages = { { role = "user", content = "go" } },
+      on_done = function(err, info)
+        done.err, done.info, done.settled = err, info, true
+      end,
+    })
+    return done
+  end
+
+  ---One SSE event carrying a content (or reasoning) delta, with the bulky
+  ---per-token framing real servers send.
+  local function sse_delta(field, text)
+    local framing = ("f"):rep(200)
+    return string.format(
+      'data: {"id":"chatcmpl-%s","object":"chat.completion.chunk","created":1,"model":"m",'
+        .. '"choices":[{"index":0,"delta":{"%s":%s}}]}\n\n',
+      framing,
+      field,
+      vim.json.encode(text)
+    )
+  end
+
+  H.test("the response cap counts produced payload, not stream framing", function()
+    with_transport(function(transport)
+      openai.max_response_bytes = 1024
+      local done = start_chat()
+      -- 100 one-token events: ~25 KiB of SSE, but only 100 bytes of content.
+      local chunks = {}
+      for _ = 1, 100 do
+        chunks[#chunks + 1] = sse_delta("content", "x")
+      end
+      chunks[#chunks + 1] = "data: [DONE]\n\n"
+      transport.settle(1, chunks, nil)
+      H.eq(done.err, nil, "framing-heavy stream under the payload cap succeeds")
+      H.eq(done.info.content, ("x"):rep(100), "content assembled")
+    end)
+  end)
+
+  H.test("content, reasoning, and tool arguments all count against the cap", function()
+    for _, field in ipairs({ "content", "reasoning_content" }) do
+      with_transport(function(transport)
+        openai.max_response_bytes = 256
+        local done = start_chat()
+        transport.settle(1, { sse_delta(field, ("y"):rep(300)), "data: [DONE]\n\n" }, nil)
+        H.eq(done.err, "response_too_large", field .. " over the cap is refused")
+        H.contains_text(done.info.message, "accumulation cap", "message names the cap")
+      end)
+    end
     with_transport(function(transport)
       openai.max_response_bytes = 256
-      local done
-      openai.chat({
-        settings = base_settings(),
-        messages = { { role = "user", content = "go" } },
-        on_done = function(err, info)
-          done = { err = err, info = info }
-        end,
-      })
+      local done = start_chat()
+      local args = vim.json.encode({ replacement = ("z"):rep(300) })
+      transport.settle(1, {
+        'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1",'
+          .. '"function":{"name":"propose_edit","arguments":'
+          .. vim.json.encode(args)
+          .. "}}]}}]}\n\n",
+        "data: [DONE]\n\n",
+      }, nil)
+      H.eq(done.err, "response_too_large", "tool-call arguments over the cap are refused")
+    end)
+  end)
+
+  H.test("a raw stream guard still stops endless framing", function()
+    with_transport(function(transport)
+      local old = openai.max_stream_bytes
+      openai.max_stream_bytes = 4096
+      local done = start_chat()
+      local chunks = {}
+      for _ = 1, 100 do
+        chunks[#chunks + 1] = ": keep-alive " .. ("k"):rep(100) .. "\n\n"
+      end
+      transport.settle(1, chunks, nil)
+      openai.max_stream_bytes = old
+      H.eq(done.err, "response_too_large", "keep-alive flood is refused")
+      H.contains_text(done.info.message, "raw stream cap", "message names the raw guard")
+    end)
+  end)
+
+  H.test("non-streaming bodies keep the raw cap", function()
+    with_transport(function(transport)
+      openai.max_response_bytes = 256
+      local done = start_chat(base_settings({ capabilities = { tools = true, streaming = false } }))
       transport.settle(1, { ("x"):rep(300) }, nil)
-      H.eq(done.err, "response_too_large", "cap enforced")
+      H.eq(done.err, "response_too_large", "cap enforced on the body")
+    end)
+  end)
+
+  H.test("streamed error bodies are still read after the cap change", function()
+    with_transport(function(transport)
+      local done = start_chat()
+      transport.settle(1, { '{"error":{"message":"model not found"}}' }, "http_error")
+      H.ok(done.settled and done.err ~= nil, "error delivered")
+      H.contains_text(done.info.message, "model not found", "provider message surfaced")
     end)
   end)
 

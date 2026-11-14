@@ -340,9 +340,11 @@ function M.run(ctx, name, args)
   if #problems > 0 then
     return { ok = false, error = "invalid arguments: " .. table.concat(problems, "; ") }
   end
-  if vim.uv.now() - ctx.started_at >= ctx.limits.max_elapsed_ms then
-    return { ok = false, error = "the operation exceeded its time budget" }
-  end
+  -- max_elapsed_ms bounds each call, not the whole operation: the
+  -- operation's own deadline is the agent's elapsed_s. Restart the clock so
+  -- handlers (which poll ctx.started_at while scanning) get a full budget
+  -- even when the model took longer than that to ask for this call.
+  ctx.started_at = vim.uv.now()
 
   local ok, result = pcall(tool.handler, ctx, args or {})
   if not ok then
