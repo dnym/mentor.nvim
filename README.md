@@ -108,7 +108,7 @@ require("mentor").setup({
       model_requests = 8,
       tool_calls = 16,
       elapsed_s = 120,
-      est_tokens = 32000,      -- estimated size cap for each model request
+      est_tokens = 32000,      -- estimated size cap for each model request; old tool results are trimmed to fit
     },
     background = {             -- per Observer / consolidation pass
       model_requests = 4,

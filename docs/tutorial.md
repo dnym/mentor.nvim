@@ -108,8 +108,10 @@ require("mentor").setup({
 ```
 
 `est_tokens` must fit inside your model's context window. A local model
-with a small context needs smaller values; reduce them and ask narrower
-questions if Mentor reports that a request is too large.
+with a small context needs smaller values. When a long investigation
+approaches the limit, Mentor trims the oldest tool results, and the model
+re-reads them if it needs them. If a request still doesn't fit, ask a
+narrower question.
 
 How long a request takes depends on your provider and model. An Implement
 proposal or an Observer pass reads several nginx files before it answers,

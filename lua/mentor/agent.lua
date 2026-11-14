@@ -61,6 +61,12 @@ local function estimate(messages, extra_bytes)
   return math.ceil(bytes / 4) + 64 -- per-message framing allowance
 end
 
+-- When a request would exceed est_tokens, old tool results are elided down
+-- to this share of the budget. The headroom means trimming happens in
+-- occasional batches rather than on every request: each trim rewrites
+-- earlier messages, which invalidates a server-side prompt cache.
+local ELIDE_TARGET = 0.75
+
 ---Truncate a serialized tool result with an explicit marker.
 local function truncate_result(text, cap)
   local cut = cap > 0 and text or ""
@@ -177,6 +183,7 @@ function M.run(opts)
   local reported_input = 0
   local reported_output = 0
   local tool_bytes_total = 0
+  local elided_total = 0
   local retries_left = cfg.limits.retries_per_operation
   local last_content = nil
   local final_turn = false
@@ -210,6 +217,7 @@ function M.run(opts)
       estimated_tokens = est_spent,
       reported_input = reported_input,
       reported_output = reported_output,
+      elided_results = elided_total,
     }
   end
 
@@ -237,7 +245,8 @@ function M.run(opts)
   local function recheck_stored_context()
     local pol = policy_mod.for_project(opts.project)
     for _, m in ipairs(messages) do
-      if m.role == "tool" and not m.withheld then
+      -- Elided stubs carry no content to recheck.
+      if m.role == "tool" and not m.withheld and not m.elided then
         if m.tool and m.tool:find("^memory_") then
           local rewritten, changed = memory_mod.reauthorize_result(m.content, opts.project)
           if changed then
@@ -251,6 +260,61 @@ function M.run(opts)
         end
       end
     end
+  end
+
+  ---The call (name + raw arguments) that produced a tool message.
+  local function call_for(tool_call_id)
+    for i = #messages, 1, -1 do
+      local m = messages[i]
+      if m.role == "assistant" and m.tool_calls then
+        for _, c in ipairs(m.tool_calls) do
+          if c.id == tool_call_id then
+            return c["function"] and c["function"].name, c["function"] and c["function"].arguments
+          end
+        end
+      end
+    end
+    return nil, nil
+  end
+
+  ---Replace old tool results with one-line stubs, oldest first, until the
+  ---request fits ELIDE_TARGET of the budget. Results since the latest
+  ---assistant message (the batch the model is about to read) are kept.
+  ---Only the working copy changes; the model can re-run the tool.
+  ---@return integer elided count
+  local function elide_old_results(schema_bytes_now)
+    local last_assistant = 0
+    for i = #messages, 1, -1 do
+      if messages[i].role == "assistant" then
+        last_assistant = i
+        break
+      end
+    end
+    local target = math.floor(limits.est_tokens * ELIDE_TARGET)
+    local count = 0
+    for i = 1, last_assistant - 1 do
+      if estimate(messages, schema_bytes_now) <= target then
+        break
+      end
+      local m = messages[i]
+      if m.role == "tool" and not m.elided and not m.withheld then
+        local name, args = call_for(m.tool_call_id)
+        name = name or m.tool or "tool"
+        args = type(args) == "string" and args or ""
+        if #args > 200 then
+          args = args:sub(1, 200) .. "..."
+        end
+        m.content = string.format(
+          "[earlier %s result%s (%s) elided to fit the request budget; call the tool again if you still need it]",
+          name,
+          args ~= "" and (" for " .. args) or "",
+          string.format("%.1f KiB", #(m.content or "") / 1024)
+        )
+        m.elided = true
+        count = count + 1
+      end
+    end
+    return count
   end
 
   ---Provider-format messages (provenance stripped).
@@ -498,6 +562,16 @@ function M.run(opts)
 
     recheck_stored_context()
     local next_est = estimate(messages, request_schema_bytes)
+    if next_est > limits.est_tokens then
+      local elided = elide_old_results(request_schema_bytes)
+      if elided > 0 then
+        elided_total = elided_total + elided
+        next_est = estimate(messages, request_schema_bytes)
+        if opts.on_note then
+          opts.on_note(string.format("trimmed %d earlier tool result(s) to fit the request budget", elided))
+        end
+      end
+    end
     if next_est > limits.est_tokens then
       return stop_at_limit(
         "estimated request size ("

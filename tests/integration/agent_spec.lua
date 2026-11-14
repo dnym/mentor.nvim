@@ -313,6 +313,120 @@ return function()
     H.eq(totals.model_requests, 0, "nothing was dispatched or charged")
   end)
 
+  ---Fixture files of ~3 KiB, each with a findable marker.
+  local function big_files(proj, n)
+    for i = 1, n do
+      fs.write(proj.root .. "/big" .. i .. ".txt", "MARKER-" .. i .. "\n" .. ("x"):rep(3000) .. "\n")
+    end
+  end
+
+  local function read(i)
+    return { name = "read_file", arguments = { path = "big" .. i .. ".txt" } }
+  end
+
+  H.test("old tool results are elided to fit the budget instead of stopping", function()
+    local proj = configure("elide", {
+      limits = { interactive = { model_requests = 8, tool_calls = 16, est_tokens = 2000 } },
+    })
+    big_files(proj, 3)
+    local dispatched = capture_requests()
+    local captured = run_operation(proj, {
+      { content = "", tool_calls = { read(1) } },
+      { content = "", tool_calls = { read(2) } },
+      { content = "", tool_calls = { read(3) } },
+      { content = "answered" },
+    }, { tools = { "read_file" } })
+    agent.provider = nil
+    H.eq(captured.done.info.stop_reason, "stop", "the run finished instead of stopping")
+    H.eq(#dispatched, 4, "every request was sent")
+    local last = vim.inspect(dispatched[4].messages)
+    H.contains_text(last, "MARKER-3", "the newest result is intact")
+    H.ok(not last:find("MARKER-1", 1, true), "the oldest result was elided")
+    H.contains_text(last, "earlier read_file result for", "a stub names the tool")
+    H.contains_text(last, "big1.txt", "and its arguments")
+    H.ok(captured.done.info.usage.elided_results >= 1, "elisions are counted")
+    H.contains_text(captured.messages[2].content, "MARKER-1", "the stored transcript keeps the full result")
+    local trimmed_note = false
+    for _, n in ipairs(captured.notes) do
+      trimmed_note = trimmed_note or n:find("trimmed", 1, true) ~= nil
+    end
+    H.ok(trimmed_note, "the user is told results were trimmed")
+  end)
+
+  H.test("trimming leaves headroom so it does not happen on every request", function()
+    local proj = configure("elide-headroom", {
+      limits = { interactive = { model_requests = 8, tool_calls = 16, est_tokens = 2000 } },
+    })
+    big_files(proj, 3)
+    local captured = run_operation(proj, {
+      { content = "", tool_calls = { read(1) } },
+      { content = "", tool_calls = { read(2) } },
+      { content = "", tool_calls = { read(3) } },
+      { content = "answered" },
+    }, { tools = { "read_file" } })
+    H.eq(#captured.notes, 1, "a single trim made room for the rest of the run")
+  end)
+
+  H.test("the current batch is never elided; a request that still does not fit stops", function()
+    local proj = configure("elide-none", {
+      limits = { interactive = { model_requests = 8, tool_calls = 16, est_tokens = 600 } },
+    })
+    big_files(proj, 1)
+    local captured = run_operation(proj, {
+      { content = "", tool_calls = { read(1) } },
+      { content = "never sent" },
+    }, { tools = { "read_file" } })
+    H.contains_text(captured.done.info.stop_reason, "per-request budget", "stops with the budget explanation")
+  end)
+
+  H.test("replayed results from earlier turns are elided first", function()
+    local proj = configure("elide-history", {
+      limits = { interactive = { model_requests = 8, tool_calls = 16, est_tokens = 2000 } },
+    })
+    big_files(proj, 2)
+    local dispatched = capture_requests()
+    local history_result = vim.json.encode({ ok = true, content = "HISTORY-" .. ("h"):rep(4500) })
+    run_operation(proj, {
+      { content = "", tool_calls = { read(1) } },
+      { content = "answered" },
+    }, {
+      tools = { "read_file" },
+      messages = {
+        { role = "system", content = "test prompt" },
+        { role = "user", content = "earlier question" },
+        {
+          role = "assistant",
+          content = "",
+          tool_calls = {
+            {
+              id = "old1",
+              type = "function",
+              ["function"] = { name = "read_file", arguments = '{"path":"old.txt"}' },
+            },
+          },
+        },
+        {
+          role = "tool",
+          tool_call_id = "old1",
+          content = history_result,
+          tool = "read_file",
+          -- A real recorded source, so only elision (not the policy
+          -- recheck) can keep this result out of the request.
+          source = proj.root .. "/big2.txt",
+        },
+        { role = "assistant", content = "earlier answer" },
+        { role = "user", content = "new question" },
+      },
+    })
+    agent.provider = nil
+    local first = vim.inspect(dispatched[1].messages)
+    H.contains_text(first, "HISTORY-", "the replayed result is sent while it fits")
+    local second = vim.inspect(dispatched[2].messages)
+    H.ok(not second:find("HISTORY-", 1, true), "it is elided once the budget is exceeded")
+    H.contains_text(second, "old.txt", "its stub names the earlier call")
+    H.contains_text(second, "MARKER-1", "the current batch is kept")
+  end)
+
   H.test("cancellation ends the operation and retains conservative usage", function()
     local proj = configure("cancel")
     fake.chunk_delay_ms = 15

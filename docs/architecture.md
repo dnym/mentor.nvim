@@ -214,7 +214,16 @@ Agent loop (`lua/mentor/agent.lua`):
   deadline) and an atomic usage reservation; limits come from
   configuration. The token budget caps each request rather than the
   cumulative context (which re-counts the whole history every round); the
-  request limit bounds the total. One automatic retry per operation for
+  request limit bounds the total. When the next request would exceed it,
+  old tool results are first replaced with one-line stubs (tool, arguments,
+  size; "call the tool again if you still need it"), oldest first and
+  including results replayed from earlier Coach turns, down to 75% of the
+  budget. The headroom makes trimming happen in occasional batches, since
+  each trim rewrites earlier messages and invalidates a server-side prompt
+  cache. The batch the model is about to read is never elided (it would
+  only be re-read at the same size); if the request still does not fit,
+  the operation stops as before. Only the provider copy changes. One
+  automatic retry per operation for
   transient failures only: transport errors, timeouts, and HTTP 408/409/
   425/429/5xx (curl reports the status on stderr via write-out); other
   4xx responses fail at once with a remedy.
