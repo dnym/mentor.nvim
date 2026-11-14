@@ -62,7 +62,7 @@ Nothing talks to a model until an endpoint and model are configured. Run
 |---|---|---|
 | Neovim ≥ v0.12.6 | yes | host |
 | `curl` | yes | HTTP transport |
-| `sqlite` (shared library) | yes | local storage, via LuaJIT FFI |
+| `sqlite` shared library (Arch: `sqlite`; Debian/Ubuntu: `libsqlite3-0`, usually preinstalled; no `-dev` package needed) | yes | local storage, via LuaJIT FFI |
 | `git` | optional | project roots; status, diff, and history tools |
 | LSP servers | optional | definition and reference lookup |
 
