@@ -783,6 +783,7 @@ start_run = function(st, reason)
     project = st.proj,
     messages = messages,
     tools = tools_mod.names({ "investigation", "memory", "observer" }),
+    finish_tools = { "report_observations" },
     tool_ctx_extra = { findings_sink = sink },
     on_done = function(err, info)
       st.handle = nil
@@ -792,6 +793,12 @@ start_run = function(st, reason)
       end
       if err == "cancelled" or generation ~= st.generation then
         return -- preempted/paused/disabled mid-pass: late results never publish
+      end
+      if not sink.reported then
+        -- Surface it in :MentorStatus: otherwise a pass that ran out of
+        -- budget looks exactly like a clean one.
+        st.last_error = "the last pass ended without reporting: "
+          .. ((info and (info.message or info.stop_reason)) or err or "no report")
       end
       publish(st, sink)
       if st.pending and st.enabled and not st.paused then

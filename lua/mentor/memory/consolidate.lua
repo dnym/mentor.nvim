@@ -177,6 +177,8 @@ function M.run(proj, callbacks)
     project = proj,
     messages = messages,
     tools = CONSOLIDATION_TOOLS,
+    -- The writes are the work: a budget-limited last turn may still make them.
+    finish_tools = { "memory_remember", "memory_update", "memory_delete" },
     on_note = callbacks.on_note,
     on_tool = callbacks.on_tool,
     on_done = function(err, info)

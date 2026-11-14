@@ -225,7 +225,22 @@ Agent loop (`lua/mentor/agent.lua`):
   before every dispatch: newly excluded sources are replaced with a
   withheld marker instead of replaying their content.
 - Tool results are capped per result and per operation, with an explicit
-  truncation marker the model can see.
+  truncation marker the model can see. Once the per-operation output
+  budget is spent, later results are replaced by a note saying so rather
+  than passed through.
+- The model is told its remaining budget: once in the opening request and
+  after each tool batch. The notes go only to the provider; stored
+  transcripts stay clean. The last request a budget allows is reserved for
+  finishing: it offers only the caller's `finish_tools` (`propose_edit`
+  for Implement, `report_observations` for the Observer, the memory writes
+  for consolidation; none for Coach, which must then answer from what it
+  has), may use one call past the tool limit for them, and ends as a normal
+  stop. A pass that runs out of budget mid-investigation therefore still
+  reports instead of ending with nothing; an Observer pass that never
+  reports is shown in `:MentorStatus`.
+- Tool calls are checked against the operation's allow-list when executed,
+  not only when advertised: a model naming an unoffered tool gets a refusal
+  that lists the available ones.
 
 Coach UI (`lua/mentor/ui/chat.lua`):
 

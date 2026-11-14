@@ -201,6 +201,31 @@ return function()
     H.eq(records.observations.count(pid_of(proj)), 0, "nothing persisted")
   end)
 
+  H.test("a pass that stops before reporting says so in status", function()
+    local proj = configure("unreported", {
+      limits = { background = { model_requests = 1 } },
+    })
+    focus(proj)
+    -- The model ignores the final-turn instruction and never reports.
+    fake.script({
+      { content = "", tool_calls = { { name = "read_file", arguments = { path = "main.lua" } } } },
+    })
+    H.ok(observer.review(proj), "review started")
+    wait_for(settled)
+    local last_error = observer.status_snapshot(proj).last_error
+    H.contains_text(last_error, "ended without reporting", "unreported pass is surfaced")
+    H.contains_text(last_error, "model request limit", "the stop reason is included")
+
+    -- An explicit clean report is not an error.
+    fake.script({
+      { content = "", tool_calls = { { name = "report_observations", arguments = { findings = {} } } } },
+      { content = "clean" },
+    })
+    H.ok(observer.review(proj), "second review started")
+    wait_for(settled)
+    H.eq(observer.status_snapshot(proj).last_error, nil, "a clean report clears the issue")
+  end)
+
   H.test("repeated triggers while a pass runs coalesce into one newer pass", function()
     local proj = configure("coalesce")
     focus(proj)

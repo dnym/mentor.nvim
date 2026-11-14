@@ -63,7 +63,7 @@ end
 
 ---Truncate a serialized tool result with an explicit marker.
 local function truncate_result(text, cap)
-  local cut = text
+  local cut = cap > 0 and text or ""
   if cap > 0 then
     cut = cut:sub(1, cap)
     -- Drop a trailing partial UTF-8 sequence so the marker stays readable.
@@ -92,6 +92,9 @@ end
 ---@field on_tool fun(phase: "start"|"done", call: table, result: table|nil)|nil
 ---@field on_message fun(msg: table)|nil each assistant/tool message appended
 ---@field on_note fun(text: string)|nil progress notices (retries)
+---@field finish_tools string[]|nil tools that complete the operation (e.g.
+---  propose_edit, report_observations). On the last request a budget allows,
+---  only these are offered (none: the model must answer from what it has).
 ---@field tool_ctx_extra table|nil extra fields merged into the tool operation
 ---  context (used by the Observer engine to attach its findings sink)
 ---@field on_done fun(err: string|nil, info: table) terminal callback, exactly once
@@ -143,6 +146,26 @@ function M.run(opts)
   local tool_schemas = tools_mod.schemas(opts.tools)
   -- Tool definitions travel with every request and count toward its size.
   local schema_bytes = #tool_schemas > 0 and #vim.json.encode(tool_schemas) or 0
+
+  -- The advertised schemas are not a security boundary on their own: a
+  -- model can name any registered tool. Execution is checked against the
+  -- same allow-list.
+  local allowed, allowed_names = {}, {}
+  for _, schema in ipairs(tool_schemas) do
+    local name = schema["function"].name
+    allowed[name] = true
+    allowed_names[#allowed_names + 1] = name
+  end
+  table.sort(allowed_names)
+  local finish_set, finish_names = {}, {}
+  for _, name in ipairs(opts.finish_tools or {}) do
+    if allowed[name] then
+      finish_set[name] = true
+      finish_names[#finish_names + 1] = name
+    end
+  end
+  local finish_schemas = #finish_names > 0 and tools_mod.schemas(finish_names) or {}
+  local finish_schema_bytes = #finish_schemas > 0 and #vim.json.encode(finish_schemas) or 0
   local deadline = vim.uv.now() + limits.elapsed_s * 1000
   local day = records.usage.today()
 
@@ -156,6 +179,29 @@ function M.run(opts)
   local tool_bytes_total = 0
   local retries_left = cfg.limits.retries_per_operation
   local last_content = nil
+  local final_turn = false
+
+  local function kib(bytes)
+    return string.format("%.0f KiB", math.max(0, bytes) / 1024)
+  end
+
+  ---What is left of this operation's budget, as a note for the model.
+  local function budget_note()
+    return string.format(
+      "[run budget left: %d model request(s), %d tool call(s), %s of tool output]",
+      math.max(0, limits.model_requests - model_requests_used),
+      math.max(0, limits.tool_calls - tool_calls_used),
+      kib(limits.tool_total_bytes - tool_bytes_total)
+    )
+  end
+
+  -- State the budget up front so the model can pace its investigation. Only
+  -- the working copy changes: callers' messages and stored transcripts
+  -- never carry budget notes.
+  local opening = messages[#messages]
+  if opening and opening.role == "user" then
+    opening.content = (opening.content or "") .. "\n\n" .. budget_note()
+  end
 
   local function usage_summary()
     return {
@@ -293,11 +339,15 @@ function M.run(opts)
     end
 
     if info.tool_calls and #info.tool_calls > 0 then
+      local finished_work = false
       for _, call in ipairs(info.tool_calls) do
         if op.cancelled then
           return finish("cancelled", { usage = usage_summary() })
         end
-        if tool_calls_used >= limits.tool_calls then
+        -- The final turn may use one call beyond the limit, for a finishing
+        -- tool only: that is what the reserved turn exists for.
+        local reserve = (final_turn and finish_set[call.name]) and 1 or 0
+        if tool_calls_used >= limits.tool_calls + reserve then
           return stop_at_limit("tool call limit (" .. limits.tool_calls .. ") reached; ask again to continue")
         end
         if vim.uv.now() >= deadline then
@@ -308,14 +358,41 @@ function M.run(opts)
           opts.on_tool("start", call, nil)
         end
         tool_ctx.provenance = {}
-        local result = tools_mod.run(tool_ctx, call.name, call.arguments)
+        local result
+        if not allowed[call.name] then
+          result = {
+            ok = false,
+            error = "unknown or unavailable tool " .. tostring(call.name) .. "; available: " .. table.concat(
+              allowed_names,
+              ", "
+            ),
+          }
+        elseif final_turn and not finish_set[call.name] then
+          result = {
+            ok = false,
+            error = "this run's budget is spent; " .. (#finish_names > 0 and ("only " .. table.concat(
+              finish_names,
+              ", "
+            ) .. " can be called now") or "no more tools can be called; answer from what you have"),
+          }
+        else
+          result = tools_mod.run(tool_ctx, call.name, call.arguments)
+        end
         local serialized = vim.json.encode(result)
         if #serialized > limits.tool_result_bytes then
           serialized = truncate_result(serialized, limits.tool_result_bytes)
         end
         local remaining = limits.tool_total_bytes - tool_bytes_total
-        if #serialized > remaining then
-          serialized = truncate_result(serialized, math.max(0, remaining))
+        if remaining <= 0 and not finish_set[call.name] then
+          -- Once the budget is spent, results are replaced, not passed on.
+          serialized = vim.json.encode({
+            ok = false,
+            error = "this run's tool output budget ("
+              .. kib(limits.tool_total_bytes)
+              .. ") is used up, so this result cannot be shown; answer from what you have",
+          })
+        elseif #serialized > remaining and not finish_set[call.name] then
+          serialized = truncate_result(serialized, remaining)
         end
         tool_bytes_total = tool_bytes_total + #serialized
         local source
@@ -338,9 +415,22 @@ function M.run(opts)
             tool = call.name,
           })
         end
+        if finish_set[call.name] and result.ok then
+          finished_work = true
+        end
         if opts.on_tool then
           opts.on_tool("done", call, result)
         end
+      end
+      -- The finishing tool ran on the last allowed request: that is a normal
+      -- end, not a limit stop.
+      if final_turn and finished_work and model_requests_used >= limits.model_requests then
+        return finish(nil, { content = last_content, stop_reason = "stop", usage = usage_summary() })
+      end
+      -- Provider-only: the stored transcript got the clean result above.
+      local last = messages[#messages]
+      if last and last.role == "tool" then
+        last.content = last.content .. "\n" .. budget_note()
       end
       return dispatch()
     end
@@ -384,8 +474,30 @@ function M.run(opts)
         end
       end
     end
+    -- Reserve the last request the budget allows for finishing: offer only
+    -- the finishing tools and say so, instead of letting the run stop
+    -- mid-investigation with nothing to show for it.
+    if not final_turn then
+      local requests_left = limits.model_requests - model_requests_used
+      if
+        requests_left <= 1
+        or tool_calls_used >= limits.tool_calls
+        or tool_bytes_total >= limits.tool_total_bytes
+      then
+        final_turn = true
+        messages[#messages + 1] = {
+          role = "user",
+          content = "[run budget: this is the final model request of this run. Do not investigate further. "
+            .. (#finish_names > 0 and ("Call " .. table.concat(finish_names, " or ") .. " now with what you have.") or "Answer now from what you have gathered, and say what you could not check.")
+            .. "]",
+        }
+      end
+    end
+    local request_schemas = final_turn and finish_schemas or tool_schemas
+    local request_schema_bytes = final_turn and finish_schema_bytes or schema_bytes
+
     recheck_stored_context()
-    local next_est = estimate(messages, schema_bytes)
+    local next_est = estimate(messages, request_schema_bytes)
     if next_est > limits.est_tokens then
       return stop_at_limit(
         "estimated request size ("
@@ -401,7 +513,7 @@ function M.run(opts)
     local handle, perr = provider.chat({
       settings = settings,
       messages = provider_messages(),
-      tools = #tool_schemas > 0 and tool_schemas or nil,
+      tools = #request_schemas > 0 and request_schemas or nil,
       on_delta = opts.on_delta,
       on_start = function()
         dispatched_flag.flag = true

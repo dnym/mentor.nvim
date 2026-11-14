@@ -95,7 +95,7 @@ require("mentor").setup({
   limits = {
     interactive = { model_requests = 24, tool_calls = 40, elapsed_s = 600, est_tokens = 64000 },
     background = {
-      model_requests = 40, tool_calls = 64, elapsed_s = 900, est_tokens = 48000,
+      model_requests = 16, tool_calls = 24, elapsed_s = 600, est_tokens = 48000,
       requests_per_hour_per_project = 120,
       est_tokens_per_day_per_project = 2000000, -- fine for a local model; mind your bill on a hosted one
     },
@@ -113,10 +113,10 @@ questions if Mentor reports that a request is too large.
 
 How long a request takes depends on your provider and model. An Implement
 proposal or an Observer pass reads several nginx files before it answers,
-which can take minutes on a slow model. The background budgets above are
-generous for the same reason: with smaller ones, the Observer can run out
-of budget before it reports anything. You can keep working while either one
-runs.
+which can take minutes on a slow model. The background budgets above give
+the Observer room to read the code around your change; with less, it still
+reports on its last turn, but from less evidence. You can keep working
+while either one runs.
 
 Start Neovim inside the clone and check the setup:
 

@@ -610,6 +610,7 @@ function M.start(instruction, req)
       { role = "user", content = instruction },
     },
     tools = tools_mod.names({ "investigation", "memory", "implement" }),
+    finish_tools = { "propose_edit" },
     on_delta = append_delta,
     on_tool = function(phase, call)
       if phase == "start" then

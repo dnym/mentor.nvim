@@ -31,6 +31,9 @@ function M.report_observations(ctx, args)
       error = "no observation run is receiving reports from here",
     }
   end
+  -- Marks the pass as reported, even when every finding is refused: the
+  -- engine distinguishes "reported nothing" from "never reported".
+  sink.reported = true
   local accepted, notes = 0, {}
   for i, f in ipairs(args.findings) do
     if type(f) ~= "table" then

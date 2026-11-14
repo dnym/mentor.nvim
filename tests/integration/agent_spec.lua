@@ -127,6 +127,114 @@ return function()
     H.eq(#captured.tools / 2, 1, "exactly one tool executed")
   end)
 
+  ---Wrap the fake provider to record every request's messages and tools.
+  local function capture_requests()
+    local dispatched = {}
+    agent.provider = {
+      chat = function(req)
+        local names = {}
+        for _, t in ipairs(req.tools or {}) do
+          names[#names + 1] = t["function"].name
+        end
+        dispatched[#dispatched + 1] = { messages = req.messages, tools = req.tools and names or nil }
+        return fake.chat(req)
+      end,
+    }
+    return dispatched
+  end
+
+  H.test("once the tool output budget is spent, later results are replaced, not passed on", function()
+    local proj = configure("output-budget", {
+      limits = { interactive = { tool_total_bytes = 64 } },
+    })
+    local call = { name = "read_file", arguments = { path = "main.lua" } }
+    local captured = run_operation(proj, {
+      { content = "", tool_calls = { call, call } },
+      { content = "done" },
+    })
+    local first, second = captured.messages[2].content, captured.messages[3].content
+    H.contains_text(first, "result truncated", "the first result is cut at the budget")
+    H.contains_text(second, "tool output budget", "the second says the budget is spent")
+    H.ok(not second:find("work in progress", 1, true), "the second result is not passed on")
+  end)
+
+  H.test("tools outside the allow-list are refused when called", function()
+    local proj = configure("allow-list")
+    local captured = run_operation(proj, {
+      { content = "", tool_calls = { { name = "propose_edit", arguments = { replacement = "x" } } } },
+      { content = "ok" },
+    }, { tools = { "read_file" } })
+    H.eq(captured.tools[2].ok, false, "the unadvertised tool did not run")
+    H.contains_text(captured.messages[2].content, "unavailable tool propose_edit", "refusal names the tool")
+    H.contains_text(captured.messages[2].content, "available: read_file", "only allowed tools are listed")
+  end)
+
+  H.test("the model is told its budget; stored messages stay clean", function()
+    local proj = configure("budget-notes", {
+      limits = { interactive = { model_requests = 4, tool_calls = 16 } },
+    })
+    local dispatched = capture_requests()
+    local captured = run_operation(proj, {
+      { content = "", tool_calls = { { name = "read_file", arguments = { path = "main.lua" } } } },
+      { content = "answer" },
+    })
+    agent.provider = nil
+    local opening = dispatched[1].messages[#dispatched[1].messages].content
+    H.contains_text(opening, "run budget left: 4 model request(s), 16 tool call(s)", "budget stated up front")
+    local after_tool = dispatched[2].messages[#dispatched[2].messages].content
+    H.contains_text(
+      after_tool,
+      "run budget left: 3 model request(s), 15 tool call(s)",
+      "budget after each batch"
+    )
+    H.ok(not captured.messages[2].content:find("run budget", 1, true), "stored tool result has no note")
+  end)
+
+  H.test("the last allowed request offers only the finishing tools and ends normally", function()
+    local proj = configure("final-turn", {
+      limits = { interactive = { model_requests = 2, tool_calls = 16 } },
+    })
+    local dispatched = capture_requests()
+    local captured = run_operation(proj, {
+      { content = "", tool_calls = { { name = "read_file", arguments = { path = "main.lua" } } } },
+      { content = "", tool_calls = { { name = "list_directory", arguments = {} } } },
+    }, { finish_tools = { "list_directory" } })
+    agent.provider = nil
+    H.ok(#dispatched[1].tools > 1, "the first request offers every allowed tool")
+    H.eq(dispatched[2].tools, { "list_directory" }, "the last request offers only the finishing tool")
+    H.contains_text(
+      dispatched[2].messages[#dispatched[2].messages].content,
+      "final model request",
+      "the model is told it is the last request"
+    )
+    H.eq(captured.done.info.stop_reason, "stop", "finishing on the last request is a normal end")
+  end)
+
+  H.test("without finishing tools the last request has no tools and asks for an answer", function()
+    local proj = configure("final-answer", {
+      limits = { interactive = { model_requests = 1 } },
+    })
+    local dispatched = capture_requests()
+    run_operation(proj, { { content = "best effort answer" } })
+    agent.provider = nil
+    H.eq(dispatched[1].tools, nil, "no tools offered")
+    H.contains_text(dispatched[1].messages[#dispatched[1].messages].content, "Answer now", "asked to answer")
+  end)
+
+  H.test("a finishing tool may use one reserved call past the tool limit", function()
+    local proj = configure("reserved-call", {
+      limits = { interactive = { model_requests = 8, tool_calls = 1 } },
+    })
+    local captured = run_operation(proj, {
+      { content = "", tool_calls = { { name = "read_file", arguments = { path = "main.lua" } } } },
+      { content = "", tool_calls = { { name = "list_directory", arguments = {} } } },
+      { content = "done" },
+    }, { finish_tools = { "list_directory" } })
+    H.eq(captured.tools[4].name, "list_directory", "the finishing call ran")
+    H.eq(captured.tools[4].ok, true, "and succeeded")
+    H.eq(captured.done.info.stop_reason, "stop", "the run ended normally")
+  end)
+
   H.test("a policy change mid-operation stops transmitting the excluded source", function()
     local proj = configure("policy-recheck")
     -- Capture exactly what each dispatch would send to the provider.

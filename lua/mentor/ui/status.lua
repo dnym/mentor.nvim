@@ -102,8 +102,12 @@ local function collect_lines()
     local snap = observer_mod.status_snapshot(proj) or { enabled = false }
     lines[#lines + 1] = "Observer: "
       .. (snap.enabled and (snap.paused and "paused (this session only)" or "on") or "off")
+      .. (snap.running and "; pass running" or "")
       .. (snap.pending and "; pass pending" or "")
       .. " — :MentorObserve"
+    if snap.last_error then
+      lines[#lines + 1] = "Observer last issue: " .. snap.last_error
+    end
     local oc = records_mod.observations.counts(row_id)
     if oc.active + oc.dismissed > 0 then
       lines[#lines + 1] = "Observations: "
