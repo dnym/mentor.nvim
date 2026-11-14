@@ -19,6 +19,10 @@ Mentor also keeps a **memory** of project decisions and your learning goals,
 which you can inspect and edit as Markdown (`:MentorMemory`). Conversations,
 memory, and findings are stored locally in SQLite.
 
+New to Mentor? [docs/tutorial.md](docs/tutorial.md) walks through all of it
+by adding a small module to nginx: Coach for learning the codebase,
+Implement for the boilerplate, and the Observer for catching mistakes.
+
 Requires Neovim **v0.12.6+**. Developed on Arch Linux; other Linux systems
 are best effort.
 
