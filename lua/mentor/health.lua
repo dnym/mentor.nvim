@@ -65,7 +65,7 @@ function M.check()
     vim.health.error(
       "sqlite3 could not be loaded via LuaJIT FFI ("
         .. tostring(storage)
-        .. "); on Arch install the sqlite package (pacman -S sqlite)"
+        .. "); install the sqlite package (Arch: pacman -S sqlite; Debian/Ubuntu: apt install libsqlite3-0)"
     )
   end
 

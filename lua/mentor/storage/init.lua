@@ -36,7 +36,21 @@ long long sqlite3_changes64(void*);
 ]]
 )
 
-local lib = assert(ffi.load("sqlite3"))
+-- "sqlite3" resolves to libsqlite3.so, which Debian and Ubuntu only ship in
+-- the -dev package; the runtime package has just the versioned soname.
+local function load_sqlite()
+  local errors = {}
+  for _, name in ipairs({ "sqlite3", "libsqlite3.so.0" }) do
+    local ok, loaded = pcall(ffi.load, name)
+    if ok then
+      return loaded
+    end
+    errors[#errors + 1] = tostring(loaded)
+  end
+  error("could not load the sqlite3 shared library: " .. table.concat(errors, "; "), 0)
+end
+
+local lib = load_sqlite()
 
 local SQLITE_TRANSIENT = ffi.cast("mentor_sqlite_dtor", -1)
 local SQLITE_ROW = 100
