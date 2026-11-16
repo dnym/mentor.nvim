@@ -398,4 +398,46 @@ return function()
     H.contains_text(text, "hooks run in phases", "new answer streamed")
     H.ok(vim.fn.maparg("<CR>", "n", false, true).buffer == 1, "<CR> mapping restored")
   end)
+  H.test("<CR> on a typed draft sends it once; transcript lines stay put", function()
+    configure("crdraft")
+    edit_git_project("crproj")
+    vim.cmd("MentorChat")
+    local buf = vim.api.nvim_get_current_buf()
+    local press = function()
+      vim.fn.maparg("<CR>", "n", false, true).callback()
+      wait_until(function()
+        return chat.active_count() == 0 and chat.queued_count() == 0
+      end)
+    end
+    local count = function(needle)
+      local n = 0
+      for _, l in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+        if l == needle then
+          n = n + 1
+        end
+      end
+      return n
+    end
+
+    fake.script({ "first answer", "second answer", "third answer" })
+    vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "> foo" })
+    vim.cmd("normal! G")
+    press()
+    H.eq(count("> foo"), 1, "typed draft is not duplicated")
+    H.contains_text(chat_text(), "first answer", "draft was sent")
+
+    -- Re-sending a rendered transcript line keeps it and appends a new turn.
+    vim.fn.search("^> foo$")
+    press()
+    H.eq(count("> foo"), 2, "re-send appends a copy, original kept")
+
+    -- Editing an earlier transcript line sends the edit and restores the line.
+    vim.fn.cursor(1, 1)
+    vim.fn.search("^> foo$")
+    local r = vim.api.nvim_win_get_cursor(0)[1] - 1
+    vim.api.nvim_buf_set_text(buf, r, 2, r, 5, { "bar" }) -- in-line edit, like `cw`
+    press()
+    H.eq(count("> foo"), 2, "edited transcript line restored")
+    H.eq(count("> bar"), 1, "edited text sent once")
+  end)
 end

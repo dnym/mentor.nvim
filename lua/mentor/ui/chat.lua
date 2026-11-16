@@ -49,6 +49,33 @@ end
 local HEADER_ROWS = 6
 
 local note_ns = vim.api.nvim_create_namespace("mentor_chat_notes")
+-- Marks the user lines the plugin itself rendered, so <CR> can tell a
+-- transcript line (re-send: keep it) from a typed draft (consumed on send).
+local sent_ns = vim.api.nvim_create_namespace("mentor_chat_sent")
+local sent_text = {} -- bufnr -> extmark id -> rendered line text
+
+---@param buf integer
+---@param first integer 0-based row of the first rendered user line
+---@param lines string[]
+local function mark_sent(buf, first, lines)
+  sent_text[buf] = sent_text[buf] or {}
+  for i, line in ipairs(lines) do
+    local id = vim.api.nvim_buf_set_extmark(buf, sent_ns, first + i - 1, 0, { invalidate = true })
+    sent_text[buf][id] = line
+  end
+end
+
+---The rendered text of the transcript user line at `row` (0-based), or nil
+---when the line is a draft the user typed.
+local function sent_line_at(buf, row)
+  local marks = vim.api.nvim_buf_get_extmarks(buf, sent_ns, { row, 0 }, { row, -1 }, { details = true })
+  for _, mark in ipairs(marks) do
+    if not mark[4].invalid then
+      return (sent_text[buf] or {})[mark[1]]
+    end
+  end
+  return nil
+end
 local markdown_ready = false
 
 ---One-time Markdown wiring for chat buffers: the bundled treesitter markdown
@@ -325,13 +352,23 @@ function M.buffer_for(proj)
     local lines = header_lines()
     local rows = records.conversations.load(project_row_id(proj), "coach")
     local tool_names = {}
+    local user_spans = {}
     for _, row in ipairs(rows) do
-      for _, line in ipairs(render_row(row, tool_names)) do
+      local rendered = render_row(row, tool_names)
+      if row.role == "user" then
+        user_spans[#user_spans + 1] = { #lines, rendered }
+      end
+      for _, line in ipairs(rendered) do
         lines[#lines + 1] = line
       end
       lines[#lines + 1] = ""
     end
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.api.nvim_buf_clear_namespace(buf, sent_ns, 0, -1)
+    sent_text[buf] = {}
+    for _, span in ipairs(user_spans) do
+      mark_sent(buf, span[1], span[2])
+    end
   end
 
   vim.api.nvim_buf_set_keymap(buf, "n", "<CR>", "", {
@@ -340,8 +377,26 @@ function M.buffer_for(proj)
       local line = vim.api.nvim_get_current_line()
       local text = line:gsub("^>%s*", "")
       local row = vim.api.nvim_win_get_cursor(0)[1]
-      if text ~= "" and row > HEADER_ROWS and not line:match("^#") then
-        M.ask(text)
+      if text == "" or row <= HEADER_ROWS or line:match("^#") then
+        return
+      end
+      local cur = vim.api.nvim_get_current_buf()
+      local rendered = sent_line_at(cur, row - 1)
+      local ok, err = M.ask(text)
+      if not ok then
+        vim.notify(err, vim.log.levels.WARN)
+        return
+      end
+      -- ask() appends the message to the transcript; consume the typed draft
+      -- (or undo the edit of an earlier line) so it does not appear twice.
+      if vim.api.nvim_buf_is_valid(cur) then
+        local now = vim.api.nvim_buf_get_lines(cur, row - 1, row, false)[1]
+        if now == line then
+          local replacement = rendered and rendered ~= line and { rendered } or (not rendered and {} or nil)
+          if replacement then
+            vim.api.nvim_buf_set_lines(cur, row - 1, row, false, replacement)
+          end
+        end
       end
     end,
   })
@@ -358,6 +413,7 @@ function M.buffer_for(proj)
     buffer = buf,
     group = "mentor",
     callback = function()
+      sent_text[buf] = nil
       for i = #ask_queue, 1, -1 do
         if ask_queue[i].buf == buf then
           table.remove(ask_queue, i)
@@ -623,16 +679,19 @@ function M.ask(text)
   local queued = active_op ~= nil
   local last = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local start = #last
-  vim.api.nvim_buf_set_lines(buf, start, start, false, { "> " .. clean, "" })
+  local user_lines = render_row({ role = "user", content = clean }, {})
+  local written = vim.list_extend(vim.list_extend({}, user_lines), { "" })
+  vim.api.nvim_buf_set_lines(buf, start, start, false, written)
+  mark_sent(buf, start, user_lines)
   if queued then
-    vim.api.nvim_buf_set_lines(buf, start + 1, start + 1, false, { "⌁ queued" })
+    vim.api.nvim_buf_set_lines(buf, start + #user_lines, start + #user_lines, false, { "⌁ queued" })
   end
 
   ask_queue[#ask_queue + 1] = {
     buf = buf,
     identity = identity,
     text = clean,
-    start_line = start + (queued and 2 or 1),
+    start_line = start + #user_lines + (queued and 1 or 0),
   }
   pump_queue()
   return true
@@ -705,6 +764,7 @@ function M.reset()
   ask_queue = {}
   active_op = nil
   chat_buffers = {}
+  sent_text = {}
 end
 
 return M
