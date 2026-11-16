@@ -33,13 +33,71 @@ local function header_lines()
   else
     status = require("mentor.provider").describe("coach")
   end
+  -- Markdown-friendly so it renders cleanly alongside the transcript.
   return {
-    "# Mentor Coach — transcript persists across restarts",
-    "# Edit a line starting with '> ', press <CR> on it to send; :MentorChatAsk <text> also works.",
-    "# :MentorStop cancels the running request; further requests queue automatically.",
-    "# provider: " .. status,
+    "# Mentor Coach",
+    "- Transcript persists across restarts.",
+    "- Edit a line starting with `> ` and press `<CR>` on it to send; `:MentorChatAsk <text>` also works.",
+    "- `:MentorStop` cancels the running request; further requests queue automatically.",
+    "- Provider: " .. status,
     "",
   }
+end
+
+-- Header rows are never sent by <CR>; the header always has this length.
+local HEADER_ROWS = 6
+
+local note_ns = vim.api.nvim_create_namespace("mentor_chat_notes")
+local markdown_ready = false
+
+---One-time Markdown wiring for chat buffers: the bundled treesitter markdown
+---parser serves the `mentorchat` filetype (so third-party Markdown renderers
+---can attach to it by filetype), and plugin annotation lines (tool activity,
+---status notes) get their own highlight on top of the Markdown highlighting.
+local function ensure_markdown()
+  if markdown_ready then
+    return
+  end
+  markdown_ready = true
+  pcall(vim.treesitter.language.register, "markdown", "mentorchat")
+  vim.api.nvim_set_hl(0, "MentorChatNote", { default = true, link = "Comment" })
+  vim.api.nvim_set_hl(0, "MentorChatError", { default = true, link = "DiagnosticError" })
+  vim.api.nvim_set_decoration_provider(note_ns, {
+    on_win = function(_, _, buf)
+      return vim.bo[buf].filetype == "mentorchat"
+    end,
+    on_line = function(_, _, buf, row)
+      local line = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1]
+      if not line or line == "" then
+        return
+      end
+      local group
+      if line:sub(1, #"⌁ error:") == "⌁ error:" then
+        group = "MentorChatError"
+      elseif line:sub(1, #"⌁ ") == "⌁ " then
+        group = "MentorChatNote"
+      end
+      if group then
+        vim.api.nvim_buf_set_extmark(buf, note_ns, row, 0, {
+          end_row = row,
+          end_col = #line,
+          hl_group = group,
+          ephemeral = true,
+          priority = 200,
+        })
+      end
+    end,
+  })
+end
+
+---Markdown display options for a window showing a chat buffer.
+local function apply_window_options(win)
+  if not config.get().chat.markdown or not vim.api.nvim_win_is_valid(win) then
+    return
+  end
+  local wo = vim.wo[win][0]
+  wo.conceallevel = 2
+  wo.linebreak = true
 end
 
 ---Sanitized storage scope for a project identity.
@@ -255,6 +313,12 @@ function M.buffer_for(proj)
   vim.bo[buf].modifiable = true
   vim.b[buf].mentor_project = proj.identity
   vim.bo[buf].filetype = "mentorchat"
+  if config.get().chat.markdown then
+    ensure_markdown()
+    if not pcall(vim.treesitter.start, buf, "markdown") then
+      vim.bo[buf].syntax = "markdown"
+    end
+  end
 
   if fresh then
     local lines = header_lines()
@@ -274,9 +338,17 @@ function M.buffer_for(proj)
     callback = function()
       local line = vim.api.nvim_get_current_line()
       local text = line:gsub("^>%s*", "")
-      if text ~= "" and not line:match("^#") then
+      local row = vim.api.nvim_win_get_cursor(0)[1]
+      if text ~= "" and row > HEADER_ROWS and not line:match("^#") then
         M.ask(text)
       end
+    end,
+  })
+  vim.api.nvim_create_autocmd("BufWinEnter", {
+    buffer = buf,
+    group = "mentor",
+    callback = function()
+      apply_window_options(vim.api.nvim_get_current_win())
     end,
   })
   vim.api.nvim_create_autocmd({ "bufwipeout" }, {
@@ -321,6 +393,7 @@ function M.open()
   else
     vim.api.nvim_set_current_win(win)
   end
+  apply_window_options(win)
   return buf
 end
 
@@ -386,9 +459,20 @@ local function pump_queue()
       break
     end
   end
-  if stream_at >= #view then
-    vim.api.nvim_buf_set_lines(buf, #view, #view, false, { "" })
+  -- The queued placeholder has served its purpose once the request runs.
+  if view[stream_at + 1] == "⌁ queued" then
+    vim.api.nvim_buf_set_lines(buf, stream_at, stream_at + 1, false, {})
   end
+  -- A blank separator keeps the reply out of the user's "> " quote (Markdown
+  -- would otherwise continue the block quote lazily), then stream into an
+  -- empty line below it.
+  local next_line = vim.api.nvim_buf_get_lines(buf, stream_at, stream_at + 1, false)[1]
+  if next_line == "" then
+    vim.api.nvim_buf_set_lines(buf, stream_at, stream_at, false, { "" })
+  else
+    vim.api.nvim_buf_set_lines(buf, stream_at, stream_at, false, { "", "" })
+  end
+  stream_at = stream_at + 1
   local op = { line_idx = stream_at, cancelled = false, handle = nil, project = item.identity }
   ops[buf] = op
   active_op = op
@@ -432,7 +516,9 @@ local function pump_queue()
       end
       note(line)
     end,
-    on_note = note,
+    on_note = function(text)
+      note("⌁ " .. text)
+    end,
     on_message = function(msg)
       -- The provider already saw it unsanitized; storage and the buffer view
       -- keep the sanitized copy so pasted credentials never persist.
@@ -444,26 +530,24 @@ local function pump_queue()
       active_op = nil
       if not op.cancelled and vim.api.nvim_buf_is_valid(buf) then
         if err == "cancelled" then
-          note("[cancelled]")
+          note("⌁ cancelled")
         elseif err then
-          note("[error: " .. ((info and info.message) or err) .. "]")
+          note("⌁ error: " .. ((info and info.message) or err))
         elseif info and info.stop_reason and info.stop_reason ~= "stop" then
-          note("[stopped: " .. info.stop_reason .. "]")
+          note("⌁ stopped: " .. info.stop_reason)
         end
         if info and info.usage and info.usage.model_requests and info.usage.model_requests > 0 then
           local u = info.usage
           local reported = u.reported_input + u.reported_output
           local note_text = string.format(
-            "[%d model request(s), %d tool call(s), ~%d est tokens",
+            "⌁ %d model request(s), %d tool call(s), ~%d est tokens",
             u.model_requests,
             u.tool_calls,
             u.estimated_tokens
           )
           if reported > 0 then
             note_text = note_text
-              .. string.format(", provider reported %d/%d]", u.reported_input, u.reported_output)
-          else
-            note_text = note_text .. "]"
+              .. string.format(", provider reported %d/%d", u.reported_input, u.reported_output)
           end
           note(note_text)
         end
@@ -484,7 +568,7 @@ local function pump_queue()
       ops[buf] = nil
     end
     if vim.api.nvim_buf_is_valid(buf) then
-      append_lines(buf, { "[error: " .. tostring(run_err) .. "]", "" })
+      append_lines(buf, { "⌁ error: " .. tostring(run_err), "" })
     end
     return
   end
@@ -533,7 +617,7 @@ function M.ask(text)
   local start = #last
   vim.api.nvim_buf_set_lines(buf, start, start, false, { "> " .. clean, "" })
   if queued then
-    vim.api.nvim_buf_set_lines(buf, start + 1, start + 1, false, { "[queued]" })
+    vim.api.nvim_buf_set_lines(buf, start + 1, start + 1, false, { "⌁ queued" })
   end
 
   ask_queue[#ask_queue + 1] = {

@@ -40,6 +40,8 @@ COMMANDS                                                        *mentor-commands
                             current project. The transcript persists across
                             restarts. In the buffer, edit a line starting
                             with "> " and press <CR> to send it.
+                            The transcript renders as Markdown (see
+                            |mentor-chat-markdown|).
 
 :MentorChatAsk {question}   Ask Coach immediately. Requests made while one
                             is running queue automatically and run in
@@ -161,6 +163,8 @@ providers.default.*      endpoint, model, api_key_env, timeout_s,
                          models), capabilities = { tools, streaming }.
 chat.history_max_tokens  Conversation history sent with each request is
                          trimmed oldest-first to this estimated budget.
+chat.markdown            Render the Coach transcript as Markdown
+                         (default true). See |mentor-chat-markdown|.
 memory.recall_limit      Entries injected into a model request (global +
                          current project, provenance-authorized) and
                          returned by memory searches.
@@ -209,6 +213,23 @@ limits.background.*      Background budgets, enforced across all
 
 Local data lives in stdpath("data")/mentor; credentials are read from the
 environment at request time and are never stored.
+
+==============================================================================
+COACH MARKDOWN                                          *mentor-chat-markdown*
+
+The Coach buffer (filetype "mentorchat") is highlighted with Neovim's
+bundled treesitter Markdown parser: headings, emphasis, inline code, links,
+lists, tables and fenced code blocks (with injected highlighting for the
+block's language). Chat windows use 'conceallevel' 2, so emphasis and code
+markers are hidden except on the cursor line. Tool activity and status
+lines use MentorChatNote (linked to Comment); lines starting "⌁ error:" use
+MentorChatError (linked to DiagnosticError).
+
+Markdown renderers that attach by filetype can provide richer output, for
+example render-markdown.nvim with: >lua
+    file_types = { "markdown", "mentorchat" }
+<
+Set `chat.markdown = false` to keep the buffer plain.
 
 ==============================================================================
 CONTEXT AND PRIVACY                                        *mentor-privacy*

@@ -101,6 +101,9 @@ function M.defaults()
       -- Conversation history sent with each Coach request is trimmed oldest
       -- first to this estimated token budget.
       history_max_tokens = 8000,
+      -- Render the transcript as Markdown (treesitter highlighting, concealed
+      -- emphasis/code markers, injected highlighting in fenced code blocks).
+      markdown = true,
     },
     implement = {
       -- Lines of surrounding context shown in the diff preview.
@@ -243,6 +246,7 @@ local function validate(cfg)
   end
 
   check(errors, "chat.history_max_tokens", cfg.chat.history_max_tokens, is_pos_int, "a positive integer")
+  check(errors, "chat.markdown", cfg.chat.markdown, is_bool, "a boolean")
 
   for _, key in ipairs({ "context_lines", "max_target_bytes", "max_replacement_bytes" }) do
     check(errors, "implement." .. key, cfg.implement[key], is_nonneg_int, "a non-negative integer")

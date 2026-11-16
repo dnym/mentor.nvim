@@ -121,6 +121,7 @@ require("mentor").setup({
   },
   chat = {
     history_max_tokens = 8000, -- Coach history is trimmed oldest-first to this
+    markdown = true,           -- render the transcript as Markdown
   },
   implement = {
     context_lines = 30,            -- context lines in the diff preview
@@ -179,6 +180,16 @@ No global keymaps are set.
 order, and the transcript persists across restarts. Coach investigates
 before answering, grounds its claims in code it has actually read, and
 escalates from hints to direct answers when you ask it to.
+
+The transcript renders as Markdown using Neovim's bundled treesitter
+parser: headings, bold/italic, inline code, links, lists, tables, and
+fenced code blocks (with the code's own language highlighted) are
+colored, and emphasis/code markers are concealed (`conceallevel=2`; move
+the cursor onto a line to see its raw text). Set `chat.markdown = false`
+for a plain buffer. The buffer's filetype is `mentorchat`, so a Markdown
+renderer that attaches by filetype can take over for richer output
+(aligned tables, heading icons), e.g. render-markdown.nvim with
+`file_types = { "markdown", "mentorchat" }`.
 
 ## Implement
 

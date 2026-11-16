@@ -130,7 +130,7 @@ return function()
     H.ok(ok1 and ok2, "both asks accepted")
     H.eq(chat.active_count(), 1, "one operation active")
     H.eq(chat.queued_count(), 1, "second request queued")
-    H.contains_text(chat_text(), "[queued]", "queue notice")
+    H.contains_text(chat_text(), "⌁ queued", "queue notice")
     wait_until(function()
       return chat.active_count() == 0 and chat.queued_count() == 0
     end)
@@ -316,5 +316,53 @@ return function()
     assert_tool_pairing(out, "trimmed")
     local tiny = chat._build_request_messages("sys", { history[1], history[2], history[3] })
     H.eq(#tiny, 4, "the newest turn is always kept whole")
+  end)
+
+  H.test("the transcript renders as Markdown and replies stay out of the quote", function()
+    configure("markdown")
+    edit_git_project("mdproj")
+    vim.cmd("MentorChat")
+    local buf = vim.api.nvim_get_current_buf()
+    H.ok(vim.treesitter.highlighter.active[buf] ~= nil, "treesitter highlighter attached")
+    H.eq(vim.treesitter.get_parser(buf):lang(), "markdown", "markdown parser")
+    H.eq(vim.wo.conceallevel, 2, "markup concealed in the chat window")
+
+    fake.chunk_delay_ms = 10
+    fake.script({ words("first", 10), "**bold** answer" })
+    chat.ask("first question")
+    chat.ask("second question")
+    wait_until(function()
+      return chat.active_count() == 0 and chat.queued_count() == 0
+    end)
+    local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+    for i, line in ipairs(lines) do
+      if line:sub(1, 2) == "> " and i > 1 then
+        H.eq(lines[i + 1], "", "blank line ends the quote after: " .. line)
+      end
+      H.neq(line, "⌁ queued", "queued placeholder removed once running")
+    end
+    H.contains_text(chat_text(), "**bold** answer", "markup text kept intact")
+
+    -- Header rows are never sent by <CR>.
+    vim.cmd("normal! gg")
+    vim.cmd("normal! j")
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "x", false)
+    H.eq(chat.active_count() + chat.queued_count(), 0, "header line not sent")
+  end)
+
+  H.test("chat.markdown = false leaves the chat buffer plain", function()
+    chat.reset()
+    project.reset()
+    storage.close()
+    mentor.setup({
+      dev = { fake_provider = true },
+      data_dir = fs.tmpdir() .. "/data-plain",
+      chat = { markdown = false },
+    })
+    edit_git_project("plainproj")
+    vim.cmd("MentorChat")
+    local buf = vim.api.nvim_get_current_buf()
+    H.ok(vim.treesitter.highlighter.active[buf] == nil, "no treesitter highlighter")
+    H.eq(vim.bo[buf].filetype, "mentorchat", "filetype still set")
   end)
 end
