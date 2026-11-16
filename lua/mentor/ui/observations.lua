@@ -10,6 +10,7 @@ local project = require("mentor.project")
 local config = require("mentor.config")
 local records = require("mentor.storage.records")
 
+local scratch = require("mentor.ui.scratch")
 local M = {}
 
 local obs_buffers = {} -- project identity -> bufnr
@@ -194,8 +195,8 @@ function M.open()
   end
 
   local name = view_name(proj.identity)
-  local buf = vim.fn.bufnr(name)
-  if buf == -1 or not vim.api.nvim_buf_is_valid(buf) then
+  local buf = scratch.find(name)
+  if not buf then
     buf = vim.api.nvim_create_buf(false, true)
     pcall(vim.api.nvim_buf_set_name, buf, name)
     vim.bo[buf].buftype = "nofile"
@@ -271,6 +272,7 @@ function M.open()
       render(buf, proj)
     end)
     vim.keymap.set("n", "q", "<cmd>bdelete<cr>", { buffer = buf, noremap = true, silent = true })
+    scratch.wipe_on_unload(buf, "mentor")
   end
   obs_buffers[proj.identity] = buf
 

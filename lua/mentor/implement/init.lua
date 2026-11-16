@@ -16,6 +16,7 @@ local project_mod = require("mentor.project")
 local prompts = require("mentor.prompts")
 local tools_mod = require("mentor.tools")
 
+local scratch = require("mentor.ui.scratch")
 local M = {}
 
 local BLOCKWISE_MSG = "mentor.nvim: blockwise selections are not supported yet; "
@@ -554,11 +555,14 @@ function M.start(instruction, req)
     return nil, err
   end
 
+  local run_name = "mentor://implement-run/" .. proj.identity
+  scratch.find(run_name) -- frees the name if a previous run's view was unloaded
   local buf = vim.api.nvim_create_buf(false, true)
-  pcall(vim.api.nvim_buf_set_name, buf, "mentor://implement-run/" .. proj.identity)
+  pcall(vim.api.nvim_buf_set_name, buf, run_name)
   vim.bo[buf].buftype = "nofile"
   vim.bo[buf].swapfile = false
   vim.bo[buf].bufhidden = "wipe"
+  scratch.wipe_on_unload(buf, "mentor")
   vim.bo[buf].filetype = "mentortext"
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
     "# Implement — " .. describe_target(target),

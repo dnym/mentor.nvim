@@ -13,6 +13,7 @@ local project = require("mentor.project")
 local config = require("mentor.config")
 local memory = require("mentor.memory")
 
+local scratch = require("mentor.ui.scratch")
 local M = {}
 
 local memory_buffers = {} -- project identity -> bufnr
@@ -328,7 +329,7 @@ function M.open()
   end
   local name = view_name(proj.identity)
   local existing = memory_buffers[proj.identity]
-  if existing and vim.api.nvim_buf_is_valid(existing) then
+  if scratch.usable(existing) and vim.b[existing].mentor_project == proj.identity then
     local win = vim.fn.bufwinid(existing)
     if win == -1 then
       vim.cmd("vsplit")
@@ -339,8 +340,8 @@ function M.open()
     return existing
   end
 
-  local buf = vim.fn.bufnr(name)
-  if buf == -1 then
+  local buf = scratch.find(name)
+  if not buf then
     buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_name(buf, name)
   end
@@ -369,9 +370,12 @@ function M.open()
     buffer = buf,
     group = "mentor",
     callback = function()
-      memory_buffers[proj.identity] = nil
+      if memory_buffers[proj.identity] == buf then
+        memory_buffers[proj.identity] = nil
+      end
     end,
   })
+  scratch.wipe_on_unload(buf, "mentor")
   memory_buffers[proj.identity] = buf
 
   vim.cmd("vsplit")

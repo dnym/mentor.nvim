@@ -13,6 +13,7 @@ local sanitize = require("mentor.sanitize")
 local prompts = require("mentor.prompts")
 local memory_mod = require("mentor.memory")
 local tools_mod = require("mentor.tools")
+local scratch = require("mentor.ui.scratch")
 
 local M = {}
 
@@ -297,12 +298,12 @@ local build_request_messages = M._build_request_messages
 ---@param proj mentor.Project
 function M.buffer_for(proj)
   local existing = chat_buffers[proj.identity]
-  if existing and vim.api.nvim_buf_is_valid(existing) then
+  if scratch.usable(existing) and vim.b[existing].mentor_project == proj.identity then
     return existing
   end
   local name = chat_name(proj.identity)
-  local buf = vim.fn.bufnr(name)
-  local fresh = buf == -1
+  local buf = scratch.find(name)
+  local fresh = buf == nil
   if fresh then
     buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_name(buf, name)
@@ -344,6 +345,8 @@ function M.buffer_for(proj)
       end
     end,
   })
+  -- The buffer may be a recycled hidden one; clear stale handlers first.
+  vim.api.nvim_clear_autocmds({ buffer = buf, group = "mentor" })
   vim.api.nvim_create_autocmd("BufWinEnter", {
     buffer = buf,
     group = "mentor",
@@ -363,12 +366,17 @@ function M.buffer_for(proj)
       local op = ops[buf]
       if op then
         op.cancelled = true
-        op.handle:cancel()
+        if op.handle then
+          op.handle:cancel()
+        end
       end
       ops[buf] = nil
-      chat_buffers[proj.identity] = nil
+      if chat_buffers[proj.identity] == buf then
+        chat_buffers[proj.identity] = nil
+      end
     end,
   })
+  scratch.wipe_on_unload(buf, "mentor")
   chat_buffers[proj.identity] = buf
   return buf
 end
@@ -593,7 +601,7 @@ function M.ask(text)
   end
   -- Prefer the chat buffer when the caller is already in one; otherwise open.
   local buf = vim.api.nvim_win_get_buf(0)
-  if not vim.api.nvim_buf_get_name(buf):find("^mentor://coach/") then
+  if not vim.api.nvim_buf_get_name(buf):find("^mentor://coach/") or not vim.b[buf].mentor_project then
     local err
     buf, err = M.open()
     if not buf then
