@@ -407,7 +407,14 @@ digest, and the publication pipeline. Design decisions:
   per-finding cooldown. The notification policy then applies category
   rules (praise never interrupts, low-certainty design stays in the
   list, learning is list-only by default), mute/snooze preferences,
-  per-project notification pacing, and typing suppression.
+  per-project notification pacing, and typing deferral: a finding that
+  lands while Insert mode is active is held and gets its chance on
+  InsertLeave, re-checked against the current state (a source edited in
+  the meantime makes it stale and quiet). Whenever the policy keeps a
+  finding quiet, the reason is stored with it (`notify_note`) and shown in
+  the list. Persisted timestamps are wall-clock epoch milliseconds
+  (`mentor.clock`); `vim.uv.now()` is monotonic since boot and is used only
+  for in-process durations.
 - **Fingerprint semantics** (learned the hard way): if a buffer is
   loaded and modified, only the recorded `changedtick` can confirm the
   claim; otherwise the disk stat is authoritative — a *clean* buffer

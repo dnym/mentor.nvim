@@ -227,9 +227,11 @@ and they always yield to your interactive requests.
 
 Findings are deduplicated, and a finding whose code changed while the model
 was thinking is marked stale instead of notifying you. Notifications are
-deliberately rare: at most one per project per minute, none while you type,
-and none for praise or low-confidence design notes. `:MentorObservations` holds the
-full list, and `<CR>` on a finding hands it to Coach for an explanation.
+deliberately rare: at most one per project per minute, none while you type
+(a finding that arrives then notifies once you leave Insert mode), and none
+for praise or low-confidence design notes. `:MentorObservations` holds the
+full list, says why a quiet finding didn't notify, and `<CR>` on a finding
+hands it to Coach for an explanation.
 
 ## Memory
 

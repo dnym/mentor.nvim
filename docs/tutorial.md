@@ -480,8 +480,9 @@ Turn on background review for this project:
 
 From now on, a short while after you stop typing or save, the Observer
 sends a size-capped summary of your changes against `HEAD` to the model and
-records its findings. It never interrupts Insert mode, and it notifies you
-at most once a minute.
+records its findings. It never interrupts Insert mode (a finding that
+arrives while you type notifies once you leave it), and it notifies you at
+most once a minute.
 
 Replace `/* BY HAND: counting, lookup, insertion, eviction */` with the
 code below. Type it rather than paste it if you can: this is the part of
@@ -682,7 +683,8 @@ When a notification arrives, or whenever you like, open the findings:
 Keys in that list: `<CR>` asks Coach to explain the finding under the
 cursor, `d` dismisses it, `u` / `x` rate it useful / not useful, `s`
 snoozes its category, `m` mutes it, `R` rechecks whether findings are
-stale, and `q` closes the list. If nothing has shown up after a minute,
+stale, and `q` closes the list. A finding that didn't notify says why on
+its `Not notified:` line. If nothing has shown up after a minute,
 trigger a pass by hand:
 
 ```vim

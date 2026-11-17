@@ -264,7 +264,7 @@ local function migrate()
   table.sort(files)
   local current = tonumber(M.query("PRAGMA user_version;")[1].user_version) or 0
   for _, file in ipairs(files) do
-    local version = tonumber(string.match(file, "/(%d+)_[-%w]*%.sql$"))
+    local version = tonumber(string.match(file, "/(%d+)_[-_%w]*%.sql$"))
     if version and version > current then
       local body = assert(vim.fn.readfile(file), "unreadable migration " .. file)
       M.transaction(function()

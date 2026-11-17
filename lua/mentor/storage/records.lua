@@ -3,6 +3,7 @@
 -- parameterized methods that require an explicit scope.
 
 local storage = require("mentor.storage")
+local clock = require("mentor.clock")
 
 local M = {}
 local projects = {}
@@ -24,7 +25,7 @@ function projects.touch(rec)
   end
   local _, id = storage.execute(
     "INSERT INTO project (identity, root, is_git, git_common_dir, created_at) VALUES (?, ?, ?, ?, ?);",
-    { rec.identity, rec.root, rec.is_git, rec.git_common_dir, math.floor(vim.uv.now()) }
+    { rec.identity, rec.root, rec.is_git, rec.git_common_dir, clock.now_ms() }
   )
   return id
 end
@@ -75,7 +76,7 @@ function conversations.append(project_id, mode, msg)
       msg.tool_call_id,
       msg.source,
       msg.tool,
-      math.floor(vim.uv.now()),
+      clock.now_ms(),
     }
   )
   return id
@@ -155,7 +156,7 @@ end
 ---@param e mentor.MemoryInsert
 ---@return integer entry id
 function memory.insert(e)
-  local now = math.floor(vim.uv.now())
+  local now = clock.now_ms()
   local _, id = storage.execute(
     "INSERT INTO memory_entry (scope, project_id, entry_key, category, summary, content, uncertainty, refs,"
       .. " status, protected, revision, author, created_at, updated_at)"
@@ -199,7 +200,7 @@ function memory.append_revision(entry_id, revision, snap, author, reason)
       encode_refs(snap.refs),
       author,
       reason,
-      math.floor(vim.uv.now()),
+      clock.now_ms(),
     }
   )
 end
@@ -259,7 +260,7 @@ function memory.update(id, expected_revision, snap, author, reason, opts)
       status,
     }
   end
-  local now = math.floor(vim.uv.now())
+  local now = clock.now_ms()
   params[#params + 1] = author
   params[#params + 1] = now
   params[#params + 1] = id
@@ -278,10 +279,7 @@ end
 ---@param id integer
 ---@return integer affected
 function memory.touch_updated(id)
-  return storage.execute(
-    "UPDATE memory_entry SET updated_at = ? WHERE id = ?;",
-    { math.floor(vim.uv.now()), id }
-  ) or 0
+  return storage.execute("UPDATE memory_entry SET updated_at = ? WHERE id = ?;", { clock.now_ms(), id }) or 0
 end
 
 ---@param entry_id integer
@@ -367,7 +365,7 @@ function memory.erase(id)
     storage.execute(
       "INSERT INTO memory_audit (entry_id, scope, project_id, entry_key, action, created_at)"
         .. " VALUES (?, ?, ?, ?, 'erased', ?);",
-      { id, row.scope, row.project_id, row.entry_key, math.floor(vim.uv.now()) }
+      { id, row.scope, row.project_id, row.entry_key, clock.now_ms() }
     )
   end)
 end
@@ -381,7 +379,7 @@ function memory.audit(entry_id, action)
   end
   storage.execute(
     "INSERT INTO memory_audit (entry_id, scope, project_id, entry_key, action, created_at) VALUES (?, ?, ?, ?, ?, ?);",
-    { entry_id, row.scope, row.project_id, row.entry_key, action, math.floor(vim.uv.now()) }
+    { entry_id, row.scope, row.project_id, row.entry_key, action, clock.now_ms() }
   )
 end
 
@@ -433,7 +431,7 @@ function usage.reserve(project_id, day, kind, model_requests, est_tokens)
   local _, id = storage.execute(
     "INSERT INTO usage_reservation (project_id, day, kind, model_requests, est_tokens, state, created_at)"
       .. " VALUES (?, ?, ?, ?, ?, 'pending', ?);",
-    { project_id, day, kind, model_requests, est_tokens, math.floor(vim.uv.now()) }
+    { project_id, day, kind, model_requests, est_tokens, clock.now_ms() }
   )
   return id
 end
@@ -524,7 +522,7 @@ end
 ---@param stale_ms integer
 ---@return integer released, integer retained
 function usage.sweep(stale_ms)
-  local now = math.floor(vim.uv.now())
+  local now = clock.now_ms()
   local released =
     storage.execute("DELETE FROM usage_reservation WHERE state = 'pending' AND created_at < ?;", {
       now - stale_ms,
@@ -560,7 +558,7 @@ end
 ---@param window_ms integer
 ---@return table { requests_hour, est_tokens_day, requests_day }
 function usage.window(project_id, day, window_ms)
-  local now = math.floor(vim.uv.now())
+  local now = clock.now_ms()
   local day_row = storage.query(
     "SELECT model_requests, est_tokens FROM usage_day WHERE project_id = ? AND day = ? AND kind = 'background';",
     { project_id, day }
@@ -606,7 +604,7 @@ function observer.set_enabled(project_id, enabled, endpoint)
     "INSERT INTO observer_state (project_id, enabled, endpoint, updated_at) VALUES (?, ?, ?, ?)"
       .. " ON CONFLICT (project_id) DO UPDATE SET"
       .. " enabled = excluded.enabled, endpoint = excluded.endpoint, updated_at = excluded.updated_at;",
-    { project_id, enabled, enabled and endpoint or "", math.floor(vim.uv.now()) }
+    { project_id, enabled, enabled and endpoint or "", clock.now_ms() }
   )
 end
 
@@ -625,7 +623,7 @@ function observer.set_consolidation_day(project_id, day)
       .. " VALUES (?, 0, '', ?, ?)"
       .. " ON CONFLICT (project_id) DO UPDATE SET consolidation_day = excluded.consolidation_day,"
       .. " updated_at = excluded.updated_at;",
-    { project_id, day, math.floor(vim.uv.now()) }
+    { project_id, day, clock.now_ms() }
   )
 end
 
@@ -662,7 +660,7 @@ function observations.insert(o)
       o.question or "",
       o.issue_digest,
       o.stale and 1 or 0,
-      math.floor(vim.uv.now()),
+      clock.now_ms(),
     }
   )
   return id
@@ -739,10 +737,17 @@ end
 ---@param id integer
 ---@param notified_at integer|nil
 function observations.mark_notified(id, notified_at)
-  storage.execute("UPDATE observation SET notified_at = ? WHERE id = ?;", {
-    notified_at or math.floor(vim.uv.now()),
+  storage.execute("UPDATE observation SET notified_at = ?, notify_note = NULL WHERE id = ?;", {
+    notified_at or clock.now_ms(),
     id,
   })
+end
+
+---Why the notification policy kept a finding quiet (nil clears it).
+---@param id integer
+---@param note string|nil
+function observations.set_notify_note(id, note)
+  storage.execute("UPDATE observation SET notify_note = ? WHERE id = ?;", { note, id })
 end
 
 ---@param id integer
@@ -789,7 +794,7 @@ function observer.set_pref(project_id, category, muted, snooze_until)
       category,
       muted == nil and nil or (muted and 1 or 0),
       snooze_until,
-      math.floor(vim.uv.now()),
+      clock.now_ms(),
     }
   )
 end

@@ -11,6 +11,7 @@
 
 local project = require("mentor.project")
 local config = require("mentor.config")
+local clock = require("mentor.clock")
 local memory = require("mentor.memory")
 
 local scratch = require("mentor.ui.scratch")
@@ -23,7 +24,7 @@ local function view_name(identity)
 end
 
 local function date_str(ts)
-  return os.date("%Y-%m-%d", math.floor((ts or 0) / 1000))
+  return clock.format(ts, "%Y-%m-%d")
 end
 
 local function block_lines(e)

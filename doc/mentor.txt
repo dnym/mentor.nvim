@@ -309,11 +309,12 @@ excluded path is withheld), and if a source, the checkout, or the policy
 moved while the pass ran, the result is stored marked stale and never
 notifies. Late or cancelled results can never publish. Findings are
 advice only: the Observer has no editing tool, and its notifications are
-deduplicated, rate-limited, suppressed while typing, and fully
-controllable (dismiss, mute, snooze) from the observation list. Background
-passes run on their own tighter budgets with per-project hourly request
-and daily token caps enforced across all instances, and interactive work
-always preempts them.
+deduplicated, rate-limited, held back while typing (delivered when you
+leave Insert mode), and fully controllable (dismiss, mute, snooze) from
+the observation list, which also says why a quiet finding didn't notify.
+Background passes run on their own tighter budgets with per-project hourly
+request and daily token caps enforced across all instances, and
+interactive work always preempts them.
 
 ==============================================================================
  vim:tw=78:ts=8:ft=help:norl:

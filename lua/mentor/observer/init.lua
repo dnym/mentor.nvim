@@ -26,6 +26,7 @@ local records = require("mentor.storage.records")
 local prompts = require("mentor.prompts")
 local memory_mod = require("mentor.memory")
 local tools_mod = require("mentor.tools")
+local clock = require("mentor.clock")
 
 local M = {}
 
@@ -37,9 +38,16 @@ local running = nil
 local fresh = {}
 local installed = false
 
-local function in_insert()
+local function mode_is_insert()
   local ok, m = pcall(vim.fn.mode)
   return ok and m == "i"
+end
+
+-- Replaceable by tests: Insert mode cannot be held in the headless harness.
+local insert_probe = mode_is_insert
+
+local function in_insert()
+  return insert_probe()
 end
 
 local function slugify(text)
@@ -114,7 +122,8 @@ end
 ---@field baseline table|nil digest fingerprint snapshot for the running pass
 ---@field op_tool_ctx table|nil the running agent operation's tool context
 ---@field generation integer bumped to drop late results
----@field last_notify integer last notification time (pacing)
+---@field last_notify integer last notification time (pacing, epoch ms)
+---@field deferred integer[] finding ids held back while typing
 ---@field last_error string|nil most recent skipped-run reason (status)
 
 ---@param proj mentor.Project
@@ -146,6 +155,7 @@ local function state_for(proj)
     op_tool_ctx = nil,
     generation = 0,
     last_notify = 0,
+    deferred = {},
     last_error = nil,
   }
   states[proj.identity] = st
@@ -200,6 +210,7 @@ local function cancel_state(st, clear_pending)
   end
   if clear_pending then
     st.pending = nil
+    st.deferred = {}
   end
 end
 
@@ -566,7 +577,9 @@ local function revalidate(st)
 end
 
 ---Presentation policy: should this finding interrupt the developer now?
----@return boolean notify, string|nil reason when suppressed
+---The reason is stored with the finding so the list can explain a silent
+---one; `deferred` marks the one suppression that is only postponed (typing).
+---@return boolean notify, string|nil reason when suppressed, boolean|nil deferred
 local function may_notify(st, f, stale, prior, now)
   local ocfg = config.get().observer
   if stale then
@@ -604,9 +617,72 @@ local function may_notify(st, f, stale, prior, now)
     return false, "at most one unsolicited notification per project per minute"
   end
   if in_insert() then
-    return false, "suppressed while typing (the finding stays in the list)"
+    return false, "held back while typing; it notifies after you leave Insert mode", true
   end
   return true
+end
+
+local function announce(row)
+  vim.notify(
+    string.format(
+      "Observer [%s/%s] %s\n(:MentorObservations for details, :MentorExplain %d for a Coach handoff)",
+      row.category,
+      row.certainty,
+      row.summary,
+      row.id
+    ),
+    vim.log.levels.INFO
+  )
+end
+
+---@param row table observation row
+---@return boolean current the stored fingerprints still describe the files
+local function row_current(row)
+  local ok, fps = pcall(vim.json.decode, row.fingerprints or "")
+  if not ok or type(fps) ~= "table" then
+    return true -- no file-based claim to go stale
+  end
+  for _, fp in pairs(fps) do
+    if not fingerprint_matches(fp) then
+      return false
+    end
+  end
+  return true
+end
+
+---Findings held back while typing get their chance once Insert mode ends,
+---under the same policy re-checked against the current state (mute/snooze
+---set meanwhile, pacing, a source edited since the pass).
+---@param st mentor.ObserverState
+local function flush_deferred(st)
+  if #st.deferred == 0 or in_insert() then
+    return
+  end
+  local ids = st.deferred
+  st.deferred = {}
+  local now = clock.now_ms()
+  for _, id in ipairs(ids) do
+    local row = records.observations.get(id)
+    if row and row.dismissed == 0 and not row.notified_at then
+      local notify, reason, deferred
+      if row.stale == 1 or not row_current(row) then
+        records.observations.set_stale(id, true)
+        notify, reason = false, "a source changed while it was held back for typing"
+      else
+        notify, reason, deferred = may_notify(st, row, false, nil, now)
+      end
+      if notify then
+        records.observations.mark_notified(id, now)
+        st.last_notify = now
+        announce(row)
+      else
+        if deferred then
+          st.deferred[#st.deferred + 1] = id
+        end
+        records.observations.set_notify_note(id, reason)
+      end
+    end
+  end
 end
 
 ---@param st mentor.ObserverState
@@ -617,7 +693,7 @@ local function publish(st, sink)
   end
   local stale_pass = revalidate(st)
   local policy = policy_mod.for_project(st.proj)
-  local now = math.floor(vim.uv.now())
+  local now = clock.now_ms()
   local to_notify = {}
 
   for _, f in ipairs(sink) do
@@ -672,10 +748,16 @@ local function publish(st, sink)
     })
     fresh[id] = true
 
-    if may_notify(st, f, stale_pass, prior, now) then
+    local notify, reason, deferred = may_notify(st, f, stale_pass, prior, now)
+    if notify then
       records.observations.mark_notified(id, now)
       st.last_notify = now
       to_notify[#to_notify + 1] = id
+    else
+      records.observations.set_notify_note(id, reason)
+      if deferred then
+        st.deferred[#st.deferred + 1] = id
+      end
     end
     ::continue::
   end
@@ -683,16 +765,7 @@ local function publish(st, sink)
   for _, id in ipairs(to_notify) do
     local row = records.observations.get(id)
     if row then
-      vim.notify(
-        string.format(
-          "Observer [%s/%s] %s\n(:MentorObservations for details, :MentorExplain %d for a Coach handoff)",
-          row.category,
-          row.certainty,
-          row.summary,
-          row.id
-        ),
-        vim.log.levels.INFO
-      )
+      announce(row)
     end
   end
 end
@@ -920,10 +993,17 @@ function M.install()
       end
     end,
   })
-  -- Pending work deferred by Insert mode is reconsidered immediately.
+  -- Work deferred by Insert mode is reconsidered immediately: held-back
+  -- notifications first (scheduled, so typeahead that re-enters Insert mode
+  -- keeps them held), then pending passes.
   vim.api.nvim_create_autocmd("InsertLeave", {
     group = "mentor_observer",
     callback = function()
+      vim.schedule(function()
+        for _, st in pairs(states) do
+          flush_deferred(st)
+        end
+      end)
       for _, st in pairs(states) do
         if st.pending and not running then
           fire(st, st.pending.reason)
@@ -1040,6 +1120,13 @@ function M._reset()
   states = {}
   running = nil
   fresh = {}
+  insert_probe = mode_is_insert
+end
+
+---Test seam: replace the Insert-mode probe (nil restores the real one).
+---@param fn (fun(): boolean)|nil
+function M._set_insert_probe(fn)
+  insert_probe = fn or mode_is_insert
 end
 
 -- Internals exposed for deterministic tests.

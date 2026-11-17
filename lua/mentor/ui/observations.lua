@@ -9,6 +9,7 @@
 local project = require("mentor.project")
 local config = require("mentor.config")
 local records = require("mentor.storage.records")
+local clock = require("mentor.clock")
 
 local scratch = require("mentor.ui.scratch")
 local M = {}
@@ -20,7 +21,7 @@ local function view_name(identity)
 end
 
 local function date_str(ts)
-  return os.date("%Y-%m-%d %H:%M", math.floor((ts or 0) / 1000))
+  return clock.format(ts, "%Y-%m-%d %H:%M")
 end
 
 ---@param row table observation row
@@ -65,6 +66,9 @@ local function block_lines(row)
   if row.question ~= "" then
     out[#out + 1] = "Next step: " .. row.question
   end
+  if not row.notified_at and row.notify_note and row.notify_note ~= "" then
+    out[#out + 1] = "Not notified: " .. row.notify_note
+  end
   out[#out + 1] = ""
   return out
 end
@@ -96,9 +100,9 @@ local function render(buf, proj)
     counts.not_useful
   )
   for _, pref in ipairs(prefs) do
-    if pref.muted == 1 or pref.snooze_until > vim.uv.now() then
+    if pref.muted == 1 or pref.snooze_until > clock.now_ms() then
       local detail = pref.muted == 1 and " (muted)" or ""
-      if pref.snooze_until > vim.uv.now() then
+      if pref.snooze_until > clock.now_ms() then
         detail = detail .. " (snoozed until " .. date_str(pref.snooze_until) .. ")"
       end
       lines[#lines + 1] = "# category " .. pref.category .. detail
@@ -231,7 +235,7 @@ function M.open()
         return
       end
       local minutes = math.floor(config.get().observer.category_snooze_ms / 60000)
-      local until_ms = math.floor(vim.uv.now()) + config.get().observer.category_snooze_ms
+      local until_ms = clock.now_ms() + config.get().observer.category_snooze_ms
       records.observer.set_pref(rid, row.category, nil, until_ms)
       vim.notify(
         string.format(

@@ -18,6 +18,7 @@ local storage = require("mentor.storage")
 local fake = require("mentor.provider.fake")
 local chat = require("mentor.ui.chat")
 local consolidate = require("mentor.memory.consolidate")
+local clock = require("mentor.clock")
 
 return function()
   ---Isolated environment with a fixture git repo; returns the project.
@@ -174,8 +175,12 @@ return function()
     local concrete = find_by_digest(pid, "nil-guard-main")
     H.ok(concrete, "concrete finding persisted with its dedup key")
     H.ok(concrete.notified_at ~= nil, "correctness finding notified")
+    H.ok(concrete.created_at >= clock.EPOCH_FLOOR_MS, "created_at is wall-clock time")
+    H.ok(math.abs(concrete.notified_at - clock.now_ms()) < 60000, "notified_at is wall-clock time")
+    H.ok(concrete.notify_note == nil, "a notified finding carries no quiet reason")
     local praise = find_by_digest(pid, "praise-1")
     H.ok(praise and praise.notified_at == nil, "praise never interrupts")
+    H.contains_text(praise.notify_note, "praise never interrupts", "the quiet reason is stored")
     local design = find_by_digest(pid, "seam-idea")
     H.ok(
       design and design.certainty == "low" and design.notified_at == nil,
@@ -365,6 +370,68 @@ return function()
     local row = find_by_digest(pid_of(proj), "mid-edit")
     H.eq(row.stale, 1, "finding marked stale")
     H.ok(row.notified_at == nil, "stale finding never interrupts")
+  end)
+
+  H.test("a finding held back while typing notifies after leaving Insert mode", function()
+    local proj = configure("typing")
+    focus(proj)
+    H.ok(observer.enable(proj), "enabled")
+    script_pass({ finding({ issue_key = "typed-through" }) })
+    local typing = false
+    observer._set_insert_probe(function()
+      return typing
+    end)
+
+    observer._trigger(vim.api.nvim_win_get_buf(0), "edit")
+    wait_for(function()
+      return not settled()
+    end)
+    typing = true -- the developer starts typing while the model works
+    wait_for(function()
+      return settled() and records.observations.count(pid_of(proj)) == 1
+    end)
+    local pid = pid_of(proj)
+    local row = find_by_digest(pid, "typed-through")
+    H.ok(row.notified_at == nil, "no interruption while typing")
+    H.contains_text(row.notify_note, "typing", "the list says why it is quiet")
+
+    -- Leaving Insert mode only to re-enter it keeps the finding held.
+    vim.api.nvim_exec_autocmds("InsertLeave", {})
+    vim.wait(30)
+    H.ok(find_by_digest(pid, "typed-through").notified_at == nil, "still typing: still held")
+
+    typing = false
+    vim.api.nvim_exec_autocmds("InsertLeave", {})
+    wait_for(function()
+      return find_by_digest(pid, "typed-through").notified_at ~= nil
+    end)
+    H.ok(find_by_digest(pid, "typed-through").notify_note == nil, "the quiet reason is cleared")
+  end)
+
+  H.test("a held-back finding whose source changed meanwhile stays quiet and stale", function()
+    local proj = configure("typing-stale")
+    focus(proj)
+    local buf = vim.api.nvim_win_get_buf(0)
+    H.ok(observer.enable(proj), "enabled")
+    script_pass({ finding({ issue_key = "outdated" }) })
+    observer._trigger(buf, "edit")
+    wait_for(function()
+      return not settled()
+    end)
+    observer._set_insert_probe(function()
+      return true
+    end)
+    wait_for(function()
+      return settled() and records.observations.count(pid_of(proj)) == 1
+    end)
+    vim.api.nvim_buf_set_lines(buf, 0, 1, false, { "local function handle(value, extra)" })
+    observer._set_insert_probe(nil)
+    vim.api.nvim_exec_autocmds("InsertLeave", {})
+    vim.wait(50)
+    local row = find_by_digest(pid_of(proj), "outdated")
+    H.ok(row.notified_at == nil, "an outdated claim never interrupts")
+    H.eq(row.stale, 1, "marked stale")
+    H.contains_text(row.notify_note, "source changed", "the reason says so")
   end)
 
   H.test("preemption drops the in-flight pass before it can publish", function()
