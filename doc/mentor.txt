@@ -165,6 +165,8 @@ chat.history_max_tokens  Conversation history sent with each request is
                          trimmed oldest-first to this estimated budget.
 chat.markdown            Render the Coach transcript as Markdown
                          (default true). See |mentor-chat-markdown|.
+chat.align_tables        Pad Markdown table columns in replies to a
+                         common width (default true).
 memory.recall_limit      Entries injected into a model request (global +
                          current project, provenance-authorized) and
                          returned by memory searches.
@@ -224,6 +226,15 @@ block's language). Chat windows use 'conceallevel' 2, so emphasis and code
 markers are hidden except on the cursor line. Tool activity and status
 lines use MentorChatNote (linked to Comment); lines starting "⌁ error:" use
 MentorChatError (linked to DiagnosticError).
+
+Pipe tables in a reply are aligned once the reply finishes streaming:
+every column is padded to its widest cell, measured as displayed (concealed
+markers removed, wide characters counted by display width), and the
+delimiter row is rebuilt to match, keeping column alignment colons. Tables
+inside fenced code blocks are left alone. Only the view changes; the stored
+transcript keeps the model's text. On the cursor line concealed markers
+reappear, so that one row may look offset. Disable with
+`chat.align_tables = false`.
 
 Markdown renderers that attach by filetype can provide richer output, for
 example render-markdown.nvim with: >lua

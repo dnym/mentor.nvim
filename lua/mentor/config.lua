@@ -104,6 +104,9 @@ function M.defaults()
       -- Render the transcript as Markdown (treesitter highlighting, concealed
       -- emphasis/code markers, injected highlighting in fenced code blocks).
       markdown = true,
+      -- Align Markdown pipe tables in replies (display only; the stored
+      -- transcript keeps the model's text).
+      align_tables = true,
     },
     implement = {
       -- Lines of surrounding context shown in the diff preview.
@@ -247,6 +250,7 @@ local function validate(cfg)
 
   check(errors, "chat.history_max_tokens", cfg.chat.history_max_tokens, is_pos_int, "a positive integer")
   check(errors, "chat.markdown", cfg.chat.markdown, is_bool, "a boolean")
+  check(errors, "chat.align_tables", cfg.chat.align_tables, is_bool, "a boolean")
 
   for _, key in ipairs({ "context_lines", "max_target_bytes", "max_replacement_bytes" }) do
     check(errors, "implement." .. key, cfg.implement[key], is_nonneg_int, "a non-negative integer")

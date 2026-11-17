@@ -66,8 +66,10 @@ function M.chat(req)
     req.on_start()
   end
 
+  -- Each chunk carries the whitespace before its word, so newlines survive
+  -- streaming exactly as a real provider would deliver them.
   local words = {}
-  for word in text:gmatch("%S+") do
+  for word in text:gmatch("%s*%S+") do
     words[#words + 1] = word
   end
 
@@ -80,7 +82,7 @@ function M.chat(req)
       return
     end
     if req.on_delta then
-      req.on_delta((i == 1 and "" or " ") .. words[i])
+      req.on_delta(words[i])
     end
     vim.defer_fn(function()
       emit(i + 1)

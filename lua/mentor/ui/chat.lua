@@ -14,6 +14,7 @@ local prompts = require("mentor.prompts")
 local memory_mod = require("mentor.memory")
 local tools_mod = require("mentor.tools")
 local scratch = require("mentor.ui.scratch")
+local mdtable = require("mentor.ui.mdtable")
 
 local M = {}
 
@@ -138,6 +139,18 @@ local function project_row_id(proj)
   })
 end
 
+---Aligns Markdown tables in reply text (display only; storage keeps the
+---model's text). Widths follow concealed rendering when Markdown is on.
+---@param lines string[]
+---@return string[] lines, boolean changed
+local function align_tables(lines)
+  local cfg = config.get().chat
+  if not cfg.align_tables then
+    return lines, false
+  end
+  return mdtable.align(lines, { conceal = cfg.markdown })
+end
+
 local function append_lines(buf, lines)
   if not vim.api.nvim_buf_is_valid(buf) then
     return
@@ -158,7 +171,7 @@ local function render_row(row, tool_names)
     return out
   end
   if row.role == "assistant" then
-    local out = vim.split(row.content, "\n", { plain = true })
+    local out = align_tables(vim.split(row.content, "\n", { plain = true }))
     local calls = row.tool_calls and (pcall(vim.json.decode, row.tool_calls))
     if type(calls) == "table" then
       for _, call in ipairs(calls) do
@@ -537,7 +550,8 @@ local function pump_queue()
     vim.api.nvim_buf_set_lines(buf, stream_at, stream_at, false, { "", "" })
   end
   stream_at = stream_at + 1
-  local op = { line_idx = stream_at, cancelled = false, handle = nil, project = item.identity }
+  local op =
+    { start_idx = stream_at, line_idx = stream_at, cancelled = false, handle = nil, project = item.identity }
   ops[buf] = op
   active_op = op
 
@@ -592,6 +606,16 @@ local function pump_queue()
     end,
     on_done = function(err, info)
       active_op = nil
+      -- Tables are aligned once the reply is complete: while streaming, rows
+      -- arrive piecemeal and column widths are not yet known. Alignment
+      -- never changes the line count, so recorded positions stay valid.
+      if ops[buf] == op and vim.api.nvim_buf_is_valid(buf) then
+        local reply = vim.api.nvim_buf_get_lines(buf, op.start_idx, op.line_idx + 1, false)
+        local aligned, changed = align_tables(reply)
+        if changed then
+          vim.api.nvim_buf_set_lines(buf, op.start_idx, op.start_idx + #reply, false, aligned)
+        end
+      end
       if not op.cancelled and vim.api.nvim_buf_is_valid(buf) then
         if err == "cancelled" then
           note("⌁ cancelled")

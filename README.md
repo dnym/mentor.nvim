@@ -122,6 +122,7 @@ require("mentor").setup({
   chat = {
     history_max_tokens = 8000, -- Coach history is trimmed oldest-first to this
     markdown = true,           -- render the transcript as Markdown
+    align_tables = true,       -- pad Markdown table columns in replies
   },
   implement = {
     context_lines = 30,            -- context lines in the diff preview
@@ -186,9 +187,14 @@ parser: headings, bold/italic, inline code, links, lists, tables, and
 fenced code blocks (with the code's own language highlighted) are
 colored, and emphasis/code markers are concealed (`conceallevel=2`; move
 the cursor onto a line to see its raw text). Set `chat.markdown = false`
-for a plain buffer. The buffer's filetype is `mentorchat`, so a Markdown
-renderer that attaches by filetype can take over for richer output
-(aligned tables, heading icons), e.g. render-markdown.nvim with
+for a plain buffer. Tables in a reply are aligned once it finishes
+streaming: cells are padded to a common width, measured as they appear
+with markers concealed (wide-character aware); fenced code is never
+touched and the stored transcript keeps the model's original text. Set
+`chat.align_tables = false` to show tables as the model wrote them. The
+buffer's filetype is `mentorchat`, so a Markdown renderer that attaches
+by filetype can take over for richer output (bordered tables, heading
+icons), e.g. render-markdown.nvim with
 `file_types = { "markdown", "mentorchat" }`.
 
 ## Implement

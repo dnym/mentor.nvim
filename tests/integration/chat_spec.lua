@@ -162,6 +162,38 @@ return function()
     H.contains_text(text, "the answer holds the concept", "persisted assistant turn")
   end)
 
+  H.test("reply tables are aligned in the view once complete; storage keeps raw text", function()
+    configure("tables")
+    edit_git_project("tablesproj")
+    vim.cmd("MentorChat")
+    local raw = "Compare:\n|Name|Size|\n|-|-:|\n|alpha|1|\n|b|12345|\ndone"
+    fake.script({ raw })
+    chat.ask("compare them")
+    wait_until(function()
+      return chat.active_count() == 0 and chat.queued_count() == 0
+    end)
+    local aligned = table.concat({
+      "| Name  |  Size |",
+      "| ----- | ----: |",
+      "| alpha |     1 |",
+      "| b     | 12345 |",
+    }, "\n")
+    H.contains_text(chat_text(), "Compare:\n" .. aligned .. "\ndone", "aligned after streaming")
+
+    local proj = project.for_dir(vim.b[0].mentor_project)
+    local rows = require("mentor.storage.records").conversations.load(
+      require("mentor.storage.records").projects.touch({ identity = proj.identity, root = proj.root }),
+      "coach"
+    )
+    H.eq(rows[#rows].content, raw, "stored transcript keeps the model's text")
+
+    local buf = vim.api.nvim_get_current_buf()
+    chat.reset()
+    vim.api.nvim_buf_delete(buf, { force = true })
+    vim.cmd("MentorChat")
+    H.contains_text(chat_text(), aligned, "replayed transcript aligned too")
+  end)
+
   H.test("assistant turns with native tool calls render as activity notes", function()
     configure("toolnote")
     edit_git_project("toolnoteproject")
