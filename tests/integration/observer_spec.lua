@@ -451,6 +451,35 @@ return function()
     H.eq(records.observations.count(pid_of(proj)), 0, "late results never publish")
   end)
 
+  H.test("the observation list is highlighted Markdown and explains quiet findings", function()
+    local proj = configure("view")
+    focus(proj)
+    H.ok(observer.enable(proj), "enabled")
+    script_pass({
+      finding({ issue_key = "shown", question = "Which caller still passes one argument?" }),
+      finding({ category = "praise", summary = "tidy helper", issue_key = "quiet-praise" }),
+    })
+    observer._trigger(vim.api.nvim_win_get_buf(0), "edit")
+    wait_for(function()
+      return settled() and records.observations.count(pid_of(proj)) == 2
+    end)
+
+    H.ok(require("mentor.ui.observations").open(), "list opened")
+    local buf = vim.api.nvim_get_current_buf()
+    H.eq(vim.bo[buf].filetype, "markdown", "Markdown filetype")
+    H.ok(vim.treesitter.highlighter.active[buf] ~= nil, "treesitter highlighting attached")
+    local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+    local text = table.concat(lines, "\n")
+    H.eq(lines[1], "# Mentor observations", "single top-level heading")
+    for _, line in ipairs(lines) do
+      H.ok(line:match("^# ") == nil or line == lines[1], "no stray headings: " .. line)
+    end
+    H.contains_text(text, "- **Refs:** `main.lua`", "refs as code spans")
+    H.contains_text(text, "- **Next step:** Which caller", "next step item")
+    H.contains_text(text, "- **Not notified:** praise never interrupts", "quiet reason item")
+    vim.cmd("bwipeout!")
+  end)
+
   H.test("restored findings start stale; reopening the list revalidates them", function()
     local proj = configure("restore")
     focus(proj)

@@ -20,6 +20,16 @@ local function view_name(identity)
   return "mentor://observations/" .. identity:gsub("^/+", "")
 end
 
+---Inline code span that survives backticks inside the text.
+local function code_span(text)
+  local fence = "`"
+  while text:find(fence, 1, true) do
+    fence = fence .. "`"
+  end
+  local pad = (text:sub(1, 1) == "`" or text:sub(-1) == "`") and " " or ""
+  return fence .. pad .. text .. pad .. fence
+end
+
 local function date_str(ts)
   return clock.format(ts, "%Y-%m-%d %H:%M")
 end
@@ -60,15 +70,27 @@ local function block_lines(row)
   if row.refs and row.refs ~= "" then
     local ok, refs = pcall(vim.json.decode, row.refs)
     if ok and type(refs) == "table" and #refs > 0 then
-      out[#out + 1] = "Refs: " .. table.concat(refs, ", ")
+      local spans = {}
+      for i, ref in ipairs(refs) do
+        spans[i] = code_span(ref)
+      end
+      out[#out + 1] = ""
+      out[#out + 1] = "- **Refs:** " .. table.concat(spans, ", ")
     end
   end
+  local tail = {}
   if row.question ~= "" then
-    out[#out + 1] = "Next step: " .. row.question
+    tail[#tail + 1] = "- **Next step:** " .. row.question
   end
   if not row.notified_at and row.notify_note and row.notify_note ~= "" then
-    out[#out + 1] = "Not notified: " .. row.notify_note
+    tail[#tail + 1] = "- **Not notified:** " .. row.notify_note
   end
+  -- Separate the detail list from the model's reasoning text (which may end
+  -- in a list of its own); continue it after the Refs item.
+  if #tail > 0 and not out[#out]:match("^%- %*%*Refs:%*%*") then
+    out[#out + 1] = ""
+  end
+  vim.list_extend(out, tail)
   out[#out + 1] = ""
   return out
 end
@@ -82,17 +104,17 @@ local function render(buf, proj)
   local prefs = row_id and records.observer.prefs(row_id) or {}
 
   local lines = {
-    "# Mentor observations — generated view (the database is authoritative)",
-    "#",
-    "# Cursor on a finding, then: d dismiss · r restore · u useful · x not useful",
-    "# <CR> ask Coach to explain · s snooze this category 30min · m mute/unmute this category",
-    "# R refresh (revalidate staleness) · q close",
+    "# Mentor observations",
     "",
+    "- Generated view; the database is authoritative.",
+    "- Cursor on a finding, then: `d` dismiss · `r` restore · `u` useful · `x` not useful",
+    "- `<CR>` ask Coach to explain · `s` snooze this category 30 min · `m` mute/unmute this category",
+    "- `R` refresh (revalidate staleness) · `q` close",
   }
   local counts = row_id and records.observations.counts(row_id)
     or { active = 0, stale = 0, dismissed = 0, useful = 0, not_useful = 0 }
   lines[#lines + 1] = string.format(
-    "# %d active (%d stale), %d dismissed; rated %d useful / %d not useful",
+    "- %d active (%d stale), %d dismissed; rated %d useful / %d not useful",
     counts.active,
     counts.stale,
     counts.dismissed,
@@ -105,7 +127,7 @@ local function render(buf, proj)
       if pref.snooze_until > clock.now_ms() then
         detail = detail .. " (snoozed until " .. date_str(pref.snooze_until) .. ")"
       end
-      lines[#lines + 1] = "# category " .. pref.category .. detail
+      lines[#lines + 1] = "- Category " .. pref.category .. detail
     end
   end
   lines[#lines + 1] = ""
@@ -206,7 +228,9 @@ function M.open()
     vim.bo[buf].buftype = "nofile"
     vim.bo[buf].swapfile = false
     vim.bo[buf].bufhidden = "hide"
-    vim.bo[buf].filetype = "mentortext"
+    -- Markdown: Neovim's bundled treesitter highlighting (and any Markdown
+    -- renderer the user has) attaches by filetype.
+    vim.bo[buf].filetype = "markdown"
     vim.b[buf].mentor_project = proj.identity
 
     local function keymap(lhs, fn)
@@ -283,6 +307,8 @@ function M.open()
   render(buf, proj)
   vim.cmd("vsplit")
   local win = vim.api.nvim_get_current_win()
+  -- :vsplit copies 'diff' from a diff window; the list is never part of one.
+  vim.wo[win].diff = false
   vim.api.nvim_win_set_buf(win, buf)
   vim.wo[win][0].wrap = true
   return true
