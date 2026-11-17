@@ -203,6 +203,140 @@ return function()
     )
   end)
 
+  H.test("a run opens no window; it reports through notifications and the log", function()
+    local proj = configure("quiet-run")
+    focus(proj)
+    local wins_before = #vim.api.nvim_list_wins()
+    local tabs_before = #vim.api.nvim_list_tabpages()
+    local notes = {}
+    local orig_notify = vim.notify
+    vim.notify = function(msg, level)
+      notes[#notes + 1] = { msg = msg, level = level }
+    end
+    local ok_run, run_err = pcall(propose, "-- quiet\n")
+    vim.notify = orig_notify
+    H.ok(ok_run, tostring(run_err))
+    H.eq(#vim.api.nvim_list_wins(), wins_before, "no split while running or on the proposal")
+    H.eq(#vim.api.nvim_list_tabpages(), tabs_before, "no tab until the developer asks")
+    H.contains_text(notes[1] and notes[1].msg, "Implement running on line 1 of main.lua", "start notified")
+    H.contains_text(notes[#notes] and notes[#notes].msg, ":MentorImplementReview", "ready notification")
+
+    -- The log is one reusable Markdown buffer per project.
+    H.ok(implement.open_log(), "log opens")
+    local log = vim.api.nvim_get_current_buf()
+    H.eq(vim.api.nvim_buf_get_name(log), "mentor://implement-run/" .. proj.identity, "per-project name")
+    H.eq(vim.bo[log].filetype, "markdown", "Markdown log")
+    local text = table.concat(vim.api.nvim_buf_get_lines(log, 0, -1, false), "\n")
+    H.contains_text(text, "## line 1 of main.lua", "a section per run")
+    H.contains_text(text, "⌁ propose_edit", "tool activity as a note line")
+    H.contains_text(text, "⌁ Finished. Proposal #", "outcome note")
+    implement.reject()
+    focus(proj)
+    propose("-- again\n")
+    H.eq(vim.api.nvim_buf_get_name(log), "mentor://implement-run/" .. proj.identity, "same log buffer")
+    local sections = 0
+    for _, line in ipairs(vim.api.nvim_buf_get_lines(log, 0, -1, false)) do
+      if line:match("^## ") then
+        sections = sections + 1
+      end
+    end
+    H.eq(sections, 2, "the second run appended to the same log")
+    H.ok(implement.open_log(), "reopening reuses the window")
+    H.eq(#vim.fn.win_findbuf(log), 1, "log shown once")
+  end)
+
+  H.test("review opens a diff tab of the whole file; accept closes it and returns", function()
+    local proj = configure("review")
+    focus(proj)
+    local main_buf = vim.api.nvim_get_current_buf()
+    vim.api.nvim_buf_set_lines(
+      main_buf,
+      0,
+      -1,
+      false,
+      { "local a = 1", "print('work in progress')", "return a" }
+    )
+    local origin = vim.api.nvim_get_current_win()
+    local tabs_before = #vim.api.nvim_list_tabpages()
+    fake.script({
+      -- No trailing newline: a mid-buffer linewise range still gets whole
+      -- lines back instead of swallowing the next line.
+      {
+        content = "",
+        tool_calls = { { name = "propose_edit", arguments = { replacement = "print('done')" } } },
+      },
+      { content = "ok" },
+    })
+    H.ok(implement.start("finish", { range = 1, line1 = 2, line2 = 2, vmode = "" }), "run started")
+    H.ok(
+      vim.wait(5000, function()
+        return implement.pending_count() > 0 and implement.active_count() == 0
+      end, 5),
+      "proposal recorded"
+    )
+
+    local p = implement.review("")
+    H.ok(p, "review opened")
+    H.eq(#vim.api.nvim_list_tabpages(), tabs_before + 1, "one new tab")
+    local cur = vim.fn.bufnr("mentor://implement/" .. p.id .. "/current")
+    local prop = vim.fn.bufnr("mentor://implement/" .. p.id .. "/proposed")
+    H.eq(
+      vim.api.nvim_buf_get_lines(cur, 0, -1, false),
+      { "local a = 1", "print('work in progress')", "return a" },
+      "left side is the whole current file"
+    )
+    H.eq(
+      vim.api.nvim_buf_get_lines(prop, 0, -1, false),
+      { "local a = 1", "print('done')", "return a" },
+      "right side is the whole file as accepting would leave it"
+    )
+    H.eq(vim.bo[prop].filetype, vim.bo[main_buf].filetype, "the file's own highlighting")
+    local diffs = 0
+    for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+      if vim.wo[w].diff then
+        diffs = diffs + 1
+      end
+    end
+    H.eq(diffs, 2, "the two sides are in diff mode")
+    H.ok(
+      #vim.fn.win_findbuf(vim.fn.bufnr("mentor://implement-run/" .. proj.identity)) == 1,
+      "log shown below"
+    )
+    H.eq(vim.api.nvim_get_current_buf(), prop, "cursor on the proposed side")
+    H.ok(rawequal(implement.review(), p), "reviewing again switches to the open tab")
+    H.eq(#vim.api.nvim_list_tabpages(), tabs_before + 1, "no second tab")
+
+    -- q closes without deciding.
+    vim.cmd("normal q")
+    H.eq(#vim.api.nvim_list_tabpages(), tabs_before, "tab closed")
+    H.eq(vim.api.nvim_get_current_win(), origin, "back where the review was opened")
+    H.eq(implement.pending_count(), 1, "still pending")
+
+    -- a accepts from the tab.
+    implement.review()
+    vim.cmd("normal a")
+    H.eq(#vim.api.nvim_list_tabpages(), tabs_before, "accept closed the tab")
+    H.eq(vim.api.nvim_get_current_win(), origin, "back at the origin window")
+    H.eq(
+      vim.api.nvim_buf_get_lines(main_buf, 0, -1, false),
+      { "local a = 1", "print('done')", "return a" },
+      "applied"
+    )
+    H.eq(vim.fn.bufnr("mentor://implement/" .. p.id .. "/proposed"), -1, "review buffers gone")
+  end)
+
+  H.test("rejecting by command closes an open review tab too", function()
+    local proj = configure("review-reject")
+    focus(proj)
+    local tabs_before = #vim.api.nvim_list_tabpages()
+    propose("-- nope\n")
+    H.ok(implement.review(), "review opened")
+    H.ok(implement.reject(""), "rejected")
+    H.eq(#vim.api.nvim_list_tabpages(), tabs_before, "tab closed")
+    local _, err = implement.review()
+    H.contains_text(err, "no pending", "nothing left to review")
+  end)
+
   H.test("a proposal previews in diff buffers; accept applies it and one undo reverts", function()
     local proj = configure("accept")
     focus(proj)
@@ -229,6 +363,7 @@ return function()
       return implement.pending_count() > 0 and implement.active_count() == 0
     end, 5)
     H.ok(ok, "proposal recorded")
+    H.ok(implement.review(), "review opened")
 
     local previews = {}
     for _, b in ipairs(vim.api.nvim_list_bufs()) do
@@ -359,6 +494,7 @@ return function()
     focus(proj)
     propose("-- banner\n")
     vim.api.nvim_buf_delete(vim.fn.bufnr(proj.root .. "/main.lua"), { force = true })
+    focus(proj) -- a fresh buffer for the same file is not the captured target
     local applied, err = implement.accept()
     H.eq(applied, nil, "accept refused after the buffer was wiped")
     H.contains_text(err, "buffer", "closure is explained")

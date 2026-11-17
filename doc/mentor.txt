@@ -96,11 +96,26 @@ COMMANDS                                                        *mentor-commands
                             file; off-limits and unmodifiable buffers are
                             refused. The target range is frozen before the
                             model runs; the model can only submit
-                            replacement text for exactly that range. Each
-                            proposal opens a side-by-side diff preview.
-                            Blockwise selections are refused with an
-                            explanation. :MentorStop cancels the run and
-                            withdraws its pending proposal.
+                            replacement text for exactly that range. No
+                            window opens: notifications report the start
+                            and the outcome (proposal ready, stopped, or
+                            failed). Blockwise selections are refused with
+                            an explanation. :MentorStop cancels the run
+                            and withdraws its pending proposal.
+
+:MentorImplementReview [id] Open the pending proposal (newest, or the given
+                            id) in a new tab page: the whole file before
+                            (left) and after (right) in diff mode, with the
+                            Implement log below. In the diff buffers, `a`
+                            accepts, `r` rejects, and `q` closes the tab
+                            while the proposal stays pending. Accepting or
+                            rejecting, from the tab or by command, closes
+                            the tab and returns to the window the review
+                            was opened from.
+
+:MentorImplementLog         Show the project's Implement log: one Markdown
+                            buffer per project, a section per run, with the
+                            model's narration, tool calls, and outcomes.
 
 :MentorImplementAccept [id] Apply the pending proposal (newest, or the
                             given id). The target is revalidated first:
@@ -177,8 +192,6 @@ memory.consolidate_max_entries
                          :MentorMemory consolidate pass.
 memory.view_max_entries  Entries rendered in the :MentorMemory view
                          (newest first).
-implement.context_lines    Lines of surrounding context shown in the
-                         Implement diff preview.
 implement.max_target_bytes
                          Byte cap on the range captured by
                          :MentorImplement; larger selections are refused.

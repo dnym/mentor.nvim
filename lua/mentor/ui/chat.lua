@@ -93,7 +93,8 @@ local function ensure_markdown()
   vim.api.nvim_set_hl(0, "MentorChatError", { default = true, link = "DiagnosticError" })
   vim.api.nvim_set_decoration_provider(note_ns, {
     on_win = function(_, _, buf)
-      return vim.bo[buf].filetype == "mentorchat"
+      -- Coach buffers, plus other plugin logs that opt in via b:mentor_notes.
+      return vim.bo[buf].filetype == "mentorchat" or vim.b[buf].mentor_notes == true
     end,
     on_line = function(_, _, buf, row)
       local line = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1]
@@ -118,6 +119,9 @@ local function ensure_markdown()
     end,
   })
 end
+
+---Note highlighting for other plugin buffers that set b:mentor_notes.
+M.ensure_note_highlights = ensure_markdown
 
 ---Markdown display options for a window showing a chat buffer.
 local function apply_window_options(win)

@@ -109,8 +109,6 @@ function M.defaults()
       align_tables = true,
     },
     implement = {
-      -- Lines of surrounding context shown in the diff preview.
-      context_lines = 30,
       -- Byte cap on the targeted range captured from the buffer.
       max_target_bytes = 32768,
       -- Byte cap on a proposed replacement; larger proposals are refused.
@@ -252,7 +250,7 @@ local function validate(cfg)
   check(errors, "chat.markdown", cfg.chat.markdown, is_bool, "a boolean")
   check(errors, "chat.align_tables", cfg.chat.align_tables, is_bool, "a boolean")
 
-  for _, key in ipairs({ "context_lines", "max_target_bytes", "max_replacement_bytes" }) do
+  for _, key in ipairs({ "max_target_bytes", "max_replacement_bytes" }) do
     check(errors, "implement." .. key, cfg.implement[key], is_nonneg_int, "a non-negative integer")
   end
 

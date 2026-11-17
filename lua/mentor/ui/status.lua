@@ -77,7 +77,7 @@ local function collect_lines()
   if pending > 0 then
     lines[#lines + 1] = "Implement: "
       .. pending
-      .. " pending proposal(s) — :MentorImplementAccept / :MentorImplementReject"
+      .. " pending proposal(s) — :MentorImplementReview, then accept or reject"
   end
 
   local records_mod = require("mentor.storage.records")

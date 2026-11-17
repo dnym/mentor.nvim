@@ -125,7 +125,6 @@ require("mentor").setup({
     align_tables = true,       -- pad Markdown table columns in replies
   },
   implement = {
-    context_lines = 30,            -- context lines in the diff preview
     max_target_bytes = 32768,      -- largest selectable range
     max_replacement_bytes = 65536, -- larger proposals are refused
   },
@@ -160,6 +159,8 @@ require("mentor").setup({
 | `:MentorStop` | Cancel everything running (chat, Implement, Observer, consolidation) |
 | `:MentorStatus` | Configuration, providers, storage, activity, and usage |
 | `:MentorImplement {instruction}` | Propose an edit for the visual selection (or insert at the cursor) |
+| `:MentorImplementReview [id]` | Open the pending proposal as a diff in its own tab |
+| `:MentorImplementLog` | Show the model's narration and tool calls for this project's runs |
 | `:MentorImplementAccept [id]` | Apply the pending proposal (one `u` undoes it) |
 | `:MentorImplementReject [id]` | Discard the pending proposal |
 | `:MentorObserve [enable\|disable\|pause\|resume\|review]` | Control automatic review for this project; no argument toggles, `pause`/`resume` last for this session, `review` runs one pass without enabling |
@@ -205,7 +206,15 @@ before the model runs: the model can read the project, but it can only
 submit replacement text for that one range. It cannot choose another file
 or widen the range.
 
-The proposal opens as a diff. `:MentorImplementAccept` applies it as a
+A run never rearranges your windows. Notifications tell you when it starts
+and when a proposal is ready (or why there is none), and
+`:MentorImplementLog` shows the model's narration if you want to follow
+along. `:MentorImplementReview` opens the proposal in a new tab: the whole
+file before and after, side by side in diff mode, with the log below. Press
+`a` to accept, `r` to reject, or `q` to close the tab and decide later.
+Deciding closes the tab and puts you back where you were.
+
+`:MentorImplementAccept` (or `a` in the review) applies the proposal as a
 single undo step, but only if the buffer is unchanged since the proposal
 was made; any edit in between, even one you undid, invalidates it. Mentor
 never saves the buffer and never runs generated code. Blockwise selections

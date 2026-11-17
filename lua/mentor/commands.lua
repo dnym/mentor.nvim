@@ -135,10 +135,24 @@ function M.register()
       notify_error(err)
     end
   end, {
-    desc = "Propose a bounded edit for a visual selection or the insertion point (preview, then accept/reject)",
+    desc = "Propose a bounded edit for a visual selection or the insertion point (review, then accept/reject)",
     nargs = "+",
     range = true,
   })
+
+  vim.api.nvim_create_user_command("MentorImplementReview", function(opts)
+    local _, err = require("mentor.implement").review(opts.args)
+    if err then
+      notify_error(err)
+    end
+  end, { desc = "Review the pending Implement proposal as a diff in its own tab", nargs = "?" })
+
+  vim.api.nvim_create_user_command("MentorImplementLog", function()
+    local _, err = require("mentor.implement").open_log()
+    if err then
+      notify_error(err)
+    end
+  end, { desc = "Show this project's Implement log (the model's narration and tool activity)" })
 
   vim.api.nvim_create_user_command("MentorImplementAccept", function(opts)
     local _, err = require("mentor.implement").accept(opts.args)

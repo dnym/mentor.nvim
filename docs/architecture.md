@@ -341,8 +341,16 @@ One command, one frozen target, one tool, one explicit acceptance
   rejected like any tool), so the model cannot smuggle a new target; it
   hands replacement text to `implement.intake`, which validates caps,
   refuses no-op replacements, supersedes the previous pending proposal,
-  and renders a native side-by-side diff preview from generated scratch
-  buffers sharing identical context lines and omission markers.
+  and narrates into the project's reusable Markdown log. A run opens no
+  window: start and outcome reach the developer as notifications, and the
+  review is explicit. `implement.review` opens a tab page straight onto
+  scratch buffers (an intermediate empty buffer would refocus the project
+  to the working directory) holding the whole file before and after, the
+  latter produced with the same `nvim_buf_set_text` call accepting uses;
+  native diff mode folds unchanged context. Review buffers carry
+  `b:mentor_project` so bare commands typed there resolve the right
+  project. Any decision (accept, reject, stale, cancel, supersede) closes
+  the proposal's tab and hands focus back to the originating window.
 - Acceptance revalidates everything against the frozen snapshot: buffer
   validity and load state, name, `changedtick` (any intervening edit
   invalidates — even edit-and-undo, because the version, not the text,

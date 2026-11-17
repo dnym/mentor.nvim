@@ -8,6 +8,14 @@
 -- the buffer until the developer explicitly accepts, and acceptance
 -- revalidates everything. Proposals are ephemeral: restarting Neovim
 -- discards them. No file is ever written and generated code is never run.
+--
+-- Presentation: a run opens nothing. It reports through notifications
+-- (started, proposal ready, stopped/failed) and narrates into one reusable
+-- Markdown log per project (:MentorImplementLog). A proposal is reviewed on
+-- request (:MentorImplementReview) in its own tab page: the whole file
+-- before and after, in native diff mode, with the log below. Accepting or
+-- rejecting closes that tab and returns to the window it was opened from;
+-- the developer's own layout is never rearranged.
 
 local agent = require("mentor.agent")
 local config = require("mentor.config")
@@ -184,7 +192,10 @@ local function describe_target(target)
       target.bufname
     )
   end
-  local last_line = target.mode == "linewise" and target.range.row2 or target.range.row2 + 1
+  -- A linewise range normally ends at the start of the line after it; one
+  -- reaching the end of the buffer ends inside its last line instead.
+  local last_line = (target.mode == "linewise" and not target.range.eof) and target.range.row2
+    or target.range.row2 + 1
   return string.format(
     "%s selection covering lines %d-%d (%d bytes) of %s",
     target.mode,
@@ -205,6 +216,148 @@ local function preview_name(id, which)
   return "mentor://implement/" .. id .. "/" .. which
 end
 
+local function notify(msg, level)
+  vim.notify("mentor.nvim: " .. msg, level or vim.log.levels.INFO)
+end
+
+---Lines of text, counting a final unterminated line and not an empty
+---remainder after a trailing newline.
+local function line_count(text)
+  if text == "" then
+    return 0
+  end
+  local _, breaks = text:gsub("\n", "")
+  return breaks + (text:sub(-1) == "\n" and 0 or 1)
+end
+
+---Error text as carried inside a sentence (no repeated plugin prefix).
+local function bare(msg)
+  return (tostring(msg):gsub("^mentor%.nvim: ", ""))
+end
+
+local function short_target(target)
+  local name = vim.fn.fnamemodify(target.bufname, ":t")
+  if target.mode == "point" then
+    return string.format("line %d of %s", target.range.row1 + 1, name)
+  end
+  local last_line = (target.mode == "linewise" and not target.range.eof) and target.range.row2
+    or target.range.row2 + 1
+  if last_line == target.range.row1 + 1 then
+    return string.format("line %d of %s", last_line, name)
+  end
+  return string.format("lines %d-%d of %s", target.range.row1 + 1, last_line, name)
+end
+
+-- ---------------------------------------------------------------------------
+-- Run log: one reusable Markdown buffer per project, shown only on request
+-- ---------------------------------------------------------------------------
+
+local function log_name(proj)
+  return "mentor://implement-run/" .. proj.identity
+end
+
+---The project's log buffer, created on first use and reused afterwards.
+---@param proj mentor.Project
+---@return integer buf
+local function log_buffer(proj)
+  local name = log_name(proj)
+  local buf = scratch.find(name)
+  if buf then
+    return buf
+  end
+  buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_name(buf, name)
+  vim.bo[buf].buftype = "nofile"
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].bufhidden = "hide"
+  vim.b[buf].mentor_project = proj.identity
+  -- Plugin annotations (⌁ lines) get the same note highlight as in Coach.
+  vim.b[buf].mentor_notes = true
+  require("mentor.ui.chat").ensure_note_highlights()
+  vim.bo[buf].filetype = "markdown"
+  scratch.wipe_on_unload(buf, "mentor")
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
+    "# Mentor Implement log",
+    "",
+    "- One section per run in this session; proposals are not kept across restarts.",
+    "- `:MentorImplementReview` opens the newest pending proposal.",
+  })
+  return buf
+end
+
+---Keep windows that show the log (other than the one being typed in)
+---following its end while a run streams.
+local function follow_log(buf)
+  local current = vim.api.nvim_get_current_win()
+  local last = vim.api.nvim_buf_line_count(buf)
+  for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+    if win ~= current then
+      pcall(vim.api.nvim_win_set_cursor, win, { last, 0 })
+    end
+  end
+end
+
+---Show a log buffer: reuse a window in this tab, otherwise a split on the
+---right edge sized for prose.
+local function show_log(buf, opts)
+  opts = opts or {}
+  local win = vim.fn.bufwinid(buf)
+  if win == -1 then
+    if opts.below then
+      vim.cmd("botright split")
+      win = vim.api.nvim_get_current_win()
+      vim.api.nvim_win_set_height(win, opts.height or 12)
+    else
+      vim.cmd("botright vsplit")
+      win = vim.api.nvim_get_current_win()
+      vim.api.nvim_win_set_width(win, math.max(60, math.floor(vim.o.columns * 0.35)))
+    end
+    vim.wo[win].diff = false -- :split copies 'diff' from a diff window
+    vim.api.nvim_win_set_buf(win, buf)
+  end
+  vim.wo[win][0].wrap = true
+  vim.wo[win][0].linebreak = true
+  pcall(vim.api.nvim_win_set_cursor, win, { vim.api.nvim_buf_line_count(buf), 0 })
+  return win
+end
+
+---Open the project's Implement log (:MentorImplementLog).
+---@return boolean ok, string|nil err
+function M.open_log()
+  local proj = project_mod.ensure_current()
+  if not proj then
+    return false, "mentor.nvim: no project context"
+  end
+  vim.api.nvim_set_current_win(show_log(log_buffer(proj)))
+  return true
+end
+
+---Append plugin annotations to the session's log at the write position,
+---as `⌁ ` lines, leaving an empty line open for further streamed text.
+local function session_note(session, text)
+  local buf = session and session.buf
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then
+    return
+  end
+  local li = session.line_idx
+  local current = vim.api.nvim_buf_get_lines(buf, li, li + 1, false)[1] or ""
+  local block = {}
+  if current ~= "" then
+    block[#block + 1] = current
+  end
+  for _, part in ipairs(vim.split(text, "\n", { plain = true })) do
+    block[#block + 1] = "⌁ " .. part
+  end
+  block[#block + 1] = ""
+  vim.api.nvim_buf_set_lines(buf, li, li + 1, false, block)
+  session.line_idx = li + #block - 1
+  follow_log(buf)
+end
+
+-- ---------------------------------------------------------------------------
+-- Review tab: the whole file before and after, in native diff mode
+-- ---------------------------------------------------------------------------
+
 local function set_scratch(buf, name, filetype, lines)
   local existing = vim.fn.bufnr(name)
   if existing ~= -1 and existing ~= buf then
@@ -222,95 +375,50 @@ local function set_scratch(buf, name, filetype, lines)
   vim.bo[buf].filetype = filetype
 end
 
----Build the two scratch buffers and open them side by side in diff mode.
----Both share identical context lines and omission markers so the native
----diff highlights exactly the replaced region.
-local function render_preview(proposal)
-  local cfg = config.get().implement
-  local target = proposal.target
-  local ctx = cfg.context_lines
-
-  local before, after, head_omitted, tail_omitted = {}, {}, 0, 0
-  if vim.api.nvim_buf_is_loaded(target.buf) then
-    local nlines = vim.api.nvim_buf_line_count(target.buf)
-    local bstart = math.max(target.range.row1 - ctx, 0)
-    head_omitted = bstart
-    before = vim.api.nvim_buf_get_lines(target.buf, bstart, target.range.row1, false)
-    -- An eof-marked linewise range ends inside the last line (inclusive);
-    -- every other range ends on the next line's start.
-    local tail_start = target.range.eof and target.range.row2 + 1 or target.range.row2
-    local aend = math.min(tail_start + ctx, nlines)
-    tail_omitted = nlines - aend
-    after = vim.api.nvim_buf_get_lines(target.buf, tail_start, aend, false)
+---Close a proposal's review tab (if open) and return to the window the
+---review was opened from.
+local function close_review(p)
+  local review = p.review
+  if not review then
+    return
   end
-
-  local marker_head = head_omitted > 0
-      and string.format("... %d line(s) above the targeted range ...", head_omitted)
-    or nil
-  local marker_tail = tail_omitted > 0
-      and string.format("... %d line(s) below the targeted range ...", tail_omitted)
-    or nil
-
-  local ft = target.filetype ~= "" and target.filetype or "text"
-  local function assemble(mid)
-    local out = {}
-    if marker_head then
-      out[#out + 1] = marker_head
-    end
-    for _, l in ipairs(before) do
-      out[#out + 1] = l
-    end
-    for _, l in ipairs(mid) do
-      out[#out + 1] = l
-    end
-    for _, l in ipairs(after) do
-      out[#out + 1] = l
-    end
-    if marker_tail then
-      out[#out + 1] = marker_tail
-    end
-    return out
+  p.review = nil
+  local was_open = review.tab and vim.api.nvim_tabpage_is_valid(review.tab)
+  if was_open and #vim.api.nvim_list_tabpages() > 1 then
+    vim.api.nvim_set_current_tabpage(review.tab)
+    pcall(vim.cmd, "tabclose")
   end
-
-  local current_lines = assemble(vim.split(target.text, "\n", { plain = true }))
-  local proposed_lines = assemble(proposal.replacement_lines)
-
-  local cur_buf = vim.api.nvim_create_buf(false, true)
-  local prop_buf = vim.api.nvim_create_buf(false, true)
-  set_scratch(cur_buf, preview_name(proposal.id, "current"), ft, current_lines)
-  set_scratch(prop_buf, preview_name(proposal.id, "proposed"), ft, proposed_lines)
-  proposal.preview = { current = cur_buf, proposed = prop_buf }
-
-  vim.cmd("vsplit")
-  local w1 = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(w1, cur_buf)
-  vim.cmd("vsplit")
-  local w2 = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(w2, prop_buf)
-  for _, w in ipairs({ w1, w2 }) do
-    vim.api.nvim_win_set_option(w, "diff", true)
-    vim.api.nvim_win_set_option(w, "scrollbind", true)
+  for _, b in ipairs({ review.current, review.proposed }) do
+    if b and vim.api.nvim_buf_is_valid(b) then
+      pcall(vim.api.nvim_buf_delete, b, { force = true })
+    end
+  end
+  -- Only a review this call actually closed hands focus back; one the
+  -- developer already closed by hand leaves the cursor where it is.
+  if was_open and review.origin and vim.api.nvim_win_is_valid(review.origin) then
+    vim.api.nvim_set_current_win(review.origin)
   end
 end
 
----Append a block to the session buffer at the tracked write position.
-local function session_note(session, text)
-  local buf = session and session.buf
-  if not buf or not vim.api.nvim_buf_is_valid(buf) then
-    return
-  end
-  local li = session.line_idx
-  local current = vim.api.nvim_buf_get_lines(buf, li, li + 1, false)[1] or ""
-  local block = {}
-  if current ~= "" then
-    block[#block + 1] = current
-  end
-  for _, part in ipairs(vim.split(text, "\n", { plain = true })) do
-    block[#block + 1] = part
-  end
-  block[#block + 1] = ""
-  vim.api.nvim_buf_set_lines(buf, li, li + 1, false, block)
-  session.line_idx = li + #block - 1
+---Build the before/after buffers for a proposal: the target buffer's full
+---text, and the same text with the replacement applied exactly the way
+---accepting would apply it.
+local function build_review_buffers(p)
+  local target = p.target
+  local ft = target.filetype ~= "" and target.filetype or "text"
+  local lines = vim.api.nvim_buf_get_lines(target.buf, 0, -1, false)
+  local cur_buf = vim.api.nvim_create_buf(false, true)
+  local prop_buf = vim.api.nvim_create_buf(false, true)
+  set_scratch(cur_buf, preview_name(p.id, "current"), ft, lines)
+  set_scratch(prop_buf, preview_name(p.id, "proposed"), ft, lines)
+  -- Bound to the project, so bare commands typed in the review tab resolve it.
+  vim.b[cur_buf].mentor_project = p.project.identity
+  vim.b[prop_buf].mentor_project = p.project.identity
+  local r = target.range
+  vim.bo[prop_buf].modifiable = true
+  vim.api.nvim_buf_set_text(prop_buf, r.row1, r.col1, r.row2, r.col2, p.replacement_lines)
+  vim.bo[prop_buf].modifiable = false
+  return cur_buf, prop_buf
 end
 
 ---Called by the propose_edit tool. Validates against the frozen target and
@@ -334,6 +442,17 @@ function M.intake(project, args)
   -- normalize it away before any comparison or recording.
   if session.target.mode == "linewise" and session.target.range.eof and replacement:sub(-1) == "\n" then
     replacement = replacement:sub(1, -2)
+  end
+  -- Mid-buffer, a linewise range covers its final line break; replacement
+  -- lines without one would swallow the line that follows, so whole lines
+  -- in means whole lines out.
+  if
+    session.target.mode == "linewise"
+    and not session.target.range.eof
+    and replacement ~= ""
+    and replacement:sub(-1) ~= "\n"
+  then
+    replacement = replacement .. "\n"
   end
   if cfg.max_replacement_bytes > 0 and #replacement > cfg.max_replacement_bytes then
     return {
@@ -375,18 +494,17 @@ function M.intake(project, args)
   proposal_order[#proposal_order + 1] = proposal
   session.proposal_id = id
 
-  render_preview(proposal)
+  if previous and previous.review then
+    close_review(previous)
+  end
   session_note(
     session,
     string.format(
-      "Proposal #%d recorded: replaces %d byte(s) with %d byte(s) at the %s.\n"
-        .. "A diff preview is open (mentor://implement/%d/current vs .../proposed).\n"
-        .. "Nothing has changed yet. Accept: :MentorImplementAccept  Reject: :MentorImplementReject",
+      "Proposal #%d recorded: replaces %d byte(s) with %d byte(s) at %s. Nothing has changed yet.",
       id,
       #session.target.text,
       #replacement,
-      describe_target(session.target),
-      id
+      short_target(session.target)
     )
   )
 
@@ -395,7 +513,7 @@ function M.intake(project, args)
     proposal_id = id,
     replaced_bytes = #session.target.text,
     replacement_bytes = #replacement,
-    message = "The proposal is recorded and shown to the developer; only an explicit "
+    message = "The proposal is recorded for the developer to review; only an explicit "
       .. "accept applies it. Provide a short explanation in your final message if helpful.",
   }
 end
@@ -475,6 +593,7 @@ function M.accept(id_arg)
   if why then
     p.status = "stale"
     session_note(p.session, "Proposal #" .. p.id .. " expired: " .. why)
+    close_review(p)
     return nil, "mentor.nvim: proposal #" .. p.id .. " can no longer be applied: " .. why
   end
 
@@ -502,11 +621,13 @@ function M.accept(id_arg)
   session_note(
     p.session,
     string.format(
-      "Applied proposal #%d to %s. One undo (u) reverts it; nothing was written to disk.",
+      "Applied proposal #%d to %s. One undo (u) in that buffer reverts it; nothing was written to disk.",
       p.id,
       target.bufname
     )
   )
+  close_review(p)
+  notify(string.format("Applied proposal #%d to %s (u undoes it; not saved).", p.id, short_target(target)))
   return p
 end
 
@@ -529,6 +650,92 @@ function M.reject(id_arg)
   end
   p.status = "rejected"
   session_note(p.session, "Proposal #" .. p.id .. " rejected; the target buffer was not touched.")
+  close_review(p)
+  notify("Proposal #" .. p.id .. " rejected; " .. short_target(p.target) .. " was not touched.")
+  return p
+end
+
+---Open a pending proposal for review in its own tab page
+---(:MentorImplementReview): the whole file before (left) and after (right)
+---in native diff mode, the project's Implement log below. `a` accepts, `r`
+---rejects, `q` closes the tab and keeps the proposal pending.
+---@param id_arg string|nil proposal id; defaults to the newest pending one
+---@return table|nil proposal
+---@return string|nil err
+function M.review(id_arg)
+  id_arg = id_arg and vim.trim(id_arg) or ""
+  local id = tonumber(id_arg)
+  if id_arg ~= "" and not id then
+    return nil, "mentor.nvim: usage: :MentorImplementReview [proposal-id]"
+  end
+  local p = find_pending(id)
+  if not p then
+    return nil,
+      "mentor.nvim: no pending Implement proposal"
+        .. (id and (" with id " .. id) or "")
+        .. " for this project"
+  end
+  if p.review and vim.api.nvim_tabpage_is_valid(p.review.tab) then
+    vim.api.nvim_set_current_tabpage(p.review.tab)
+    return p
+  end
+  local why = M._stale_reason(p)
+  if why then
+    p.status = "stale"
+    session_note(p.session, "Proposal #" .. p.id .. " expired: " .. why)
+    return nil, "mentor.nvim: proposal #" .. p.id .. " can no longer be applied: " .. why
+  end
+
+  local origin = vim.api.nvim_get_current_win()
+  local cur_buf, prop_buf = build_review_buffers(p)
+  -- Open the tab straight onto a review buffer: an intermediate empty
+  -- buffer (:tabnew) would refocus the project to the working directory.
+  vim.cmd("tab sbuffer " .. cur_buf)
+  local tab = vim.api.nvim_get_current_tabpage()
+  local left = vim.api.nvim_get_current_win()
+  vim.wo[left].diff = false
+  vim.cmd("rightbelow vsplit")
+  local right = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_set_buf(right, prop_buf)
+  p.review = { tab = tab, origin = origin, current = cur_buf, proposed = prop_buf }
+
+  local keys = "a accept · r reject · q close (stays pending) · ]c next change"
+  for _, w in ipairs({ left, right }) do
+    vim.api.nvim_win_call(w, function()
+      vim.cmd("diffthis")
+    end)
+    vim.wo[w][0].wrap = false
+  end
+  vim.wo[left][0].winbar = string.format(" Proposal #%d · current %s", p.id, short_target(p.target))
+  vim.wo[right][0].winbar = string.format(" Proposal #%d · proposed · %s", p.id, keys)
+
+  for _, b in ipairs({ cur_buf, prop_buf }) do
+    local function map(lhs, fn, desc)
+      vim.keymap.set("n", lhs, fn, { buffer = b, nowait = true, silent = true, desc = desc })
+    end
+    map("a", function()
+      local _, err = M.accept(tostring(p.id))
+      if err then
+        vim.notify(err, vim.log.levels.ERROR)
+      end
+    end, "Accept this Implement proposal")
+    map("r", function()
+      local _, err = M.reject(tostring(p.id))
+      if err then
+        vim.notify(err, vim.log.levels.ERROR)
+      end
+    end, "Reject this Implement proposal")
+    map("q", function()
+      close_review(p)
+    end, "Close the review (the proposal stays pending)")
+  end
+
+  if p.session and p.session.buf and vim.api.nvim_buf_is_valid(p.session.buf) then
+    show_log(p.session.buf, { below = true, height = math.max(6, math.floor(vim.o.lines * 0.2)) })
+  end
+  vim.api.nvim_set_current_win(right)
+  -- Land on the first change.
+  pcall(vim.cmd, "normal! gg]c")
   return p
 end
 
@@ -555,34 +762,23 @@ function M.start(instruction, req)
     return nil, err
   end
 
-  local run_name = "mentor://implement-run/" .. proj.identity
-  scratch.find(run_name) -- frees the name if a previous run's view was unloaded
-  local buf = vim.api.nvim_create_buf(false, true)
-  pcall(vim.api.nvim_buf_set_name, buf, run_name)
-  vim.bo[buf].buftype = "nofile"
-  vim.bo[buf].swapfile = false
-  vim.bo[buf].bufhidden = "wipe"
-  scratch.wipe_on_unload(buf, "mentor")
-  vim.bo[buf].filetype = "mentortext"
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, {
-    "# Implement — " .. describe_target(target),
+  local buf = log_buffer(proj)
+  local header = {
     "",
-    "Instruction: " .. instruction,
+    "## " .. short_target(target),
     "",
-  })
-
-  vim.cmd("vsplit")
-  local win = vim.api.nvim_get_current_win()
-  vim.api.nvim_win_set_buf(win, buf)
-  vim.wo[win][0].wrap = true
+    "**Instruction:** " .. instruction,
+    "",
+    "",
+  }
+  vim.api.nvim_buf_set_lines(buf, -1, -1, false, header)
 
   local session = {
     project = proj,
     target = target,
     buf = buf,
-    win = win,
     proposal_id = nil,
-    line_idx = 4,
+    line_idx = vim.api.nvim_buf_line_count(buf) - 1,
   }
   sessions[proj.id] = session
 
@@ -599,12 +795,16 @@ function M.start(instruction, req)
     end
     vim.api.nvim_buf_set_lines(buf, li, li + 1, false, replacement)
     session.line_idx = li + #replacement - 1
+    follow_log(buf)
   end
 
   -- Interactive work preempts automatic background work on the shared
   -- provider endpoint.
   require("mentor.observer").preempt()
 
+  -- Before the run: a request refused synchronously reports its outcome
+  -- from inside agent.run, and that must not precede "running".
+  notify("Implement running on " .. short_target(target) .. " (:MentorImplementLog to follow along).")
   local handle, run_err = agent.run({
     mode = "implement",
     kind = "interactive",
@@ -618,7 +818,7 @@ function M.start(instruction, req)
     on_delta = append_delta,
     on_tool = function(phase, call)
       if phase == "start" then
-        append_delta("[tool: " .. call.name .. "] ")
+        session_note(session, call.name)
       end
     end,
     on_done = function(done_err, info)
@@ -633,27 +833,49 @@ function M.start(instruction, req)
         for _, p in ipairs(proposal_order) do
           if p.status == "pending" and p.session == session then
             p.status = "cancelled"
+            close_review(p)
           end
         end
         session_note(session, "Cancelled. Any pending proposal from this run has been withdrawn.")
+        notify("Implement run on " .. short_target(target) .. " cancelled.")
       elseif done_err then
-        session_note(session, "Failed: " .. ((info and info.message) or done_err))
+        local why = bare((info and info.message) or done_err)
+        session_note(session, "Failed: " .. why)
+        notify(
+          "Implement run on " .. short_target(target) .. " failed: " .. why .. " (:MentorImplementLog)",
+          vim.log.levels.WARN
+        )
       elseif session.proposal_id then
+        local p = proposals[session.proposal_id]
         session_note(
           session,
-          "Finished. Proposal #"
-            .. session.proposal_id
-            .. " awaits your decision: :MentorImplementAccept or :MentorImplementReject"
+          "Finished. Proposal #" .. session.proposal_id .. " is ready: :MentorImplementReview"
         )
-      elseif info and info.stop_reason and info.stop_reason ~= "stop" then
-        session_note(session, "Stopped without producing a proposal: " .. info.stop_reason)
+        if p and p.status == "pending" then
+          notify(
+            string.format(
+              "Proposal #%d ready for %s (%d line(s) proposed): :MentorImplementReview",
+              p.id,
+              short_target(target),
+              line_count(p.replacement)
+            )
+          )
+        end
       else
-        session_note(session, "Finished without producing a proposal.")
+        local why = (info and info.stop_reason and info.stop_reason ~= "stop")
+            and ("Stopped without producing a proposal: " .. info.stop_reason)
+          or "Finished without producing a proposal."
+        session_note(session, why)
+        notify(
+          "Implement run on " .. short_target(target) .. ": " .. why .. " (:MentorImplementLog)",
+          vim.log.levels.WARN
+        )
       end
     end,
   })
   if not handle then
     sessions[proj.id] = nil
+    session_note(session, "Could not start: " .. bare(run_err))
     return nil, run_err
   end
   session.handle = handle
@@ -695,6 +917,9 @@ end
 
 ---Drop all in-memory state (isolated checks only).
 function M._reset()
+  for _, p in ipairs(proposal_order) do
+    close_review(p)
+  end
   sessions = {}
   proposals = {}
   proposal_order = {}

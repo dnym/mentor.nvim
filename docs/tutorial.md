@@ -408,8 +408,17 @@ configuration */`, press `V` to select it, then type `:` (Neovim fills in
 :'<,'>MentorImplement Replace this line with three functions in nginx style, modeled on ngx_http_limit_req_module.c: ngx_http_hits_init_zone (the shm_zone init callback: on reload reuse the old context's sh and shpool; if shm.exists, take sh from shpool->data; otherwise slab-allocate the ngx_http_hits_shctx_t, store it in shpool->data, init the rbtree with ngx_http_hits_rbtree_insert_value and the queue, set log_ctx to ' in hits zone "NAME"' and log_nomem to 0), ngx_http_hits_create_loc_conf (status NULL, zone NGX_CONF_UNSET_PTR), and ngx_http_hits_merge_loc_conf (merge zone with default NULL).
 ```
 
-A side window shows the model's progress and tool calls. When it finishes,
-a diff opens. Review it against this checklist:
+Nothing opens while the model works; a notification says the run started.
+Run `:MentorImplementLog` if you want to watch its progress and tool calls.
+When the notification says the proposal is ready, open it:
+
+```vim
+:MentorImplementReview
+```
+
+A new tab shows the whole file before (left) and after (right) as a diff,
+with the log below. `]c` jumps to the next change. Review it against this
+checklist:
 
 - `ngx_http_hits_init_zone` has three paths: `octx` (reload: copy `sh` and
   `shpool`), `shm.exists` (take `sh` from `shpool->data`), and fresh
@@ -420,20 +429,17 @@ a diff opens. Review it against this checklist:
   `zone = NGX_CONF_UNSET_PTR`; `merge_loc_conf` uses
   `ngx_conf_merge_ptr_value(conf->zone, prev->zone, NULL)`.
 
-If it looks right:
+If it looks right, press `a` (or run `:MentorImplementAccept`). The tab
+closes and you are back in the file.
 
-```vim
-:MentorImplementAccept
-```
-
-If the side window says `Stopped without producing a proposal: tool call
+If the notification says `Stopped without producing a proposal: tool call
 limit ... reached`, the model spent its budget exploring. Run the same
 command again, and name the files it should read in the instruction. That
 is why the status-page instruction in step 8 says "read only ...".
 
 The change lands as a single undo step, so one `u` takes it back. If the
-proposal is wrong, run `:MentorImplementReject` and try again with a more
-specific instruction. You can also accept it and fix the details by hand.
+proposal is wrong, press `r` (or run `:MentorImplementReject`) and try
+again with a more specific instruction. You can also accept it and fix the details by hand.
 If you edit the buffer before you accept, even an edit you undo, the
 proposal is invalidated, because it no longer matches the text it was made
 for.
