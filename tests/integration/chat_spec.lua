@@ -211,6 +211,48 @@ return function()
     H.contains_text(text, "now I can explain", "final answer after tool roundtrip")
   end)
 
+  H.test("a reopened reply renders tool activity as compactly as it streamed", function()
+    configure("compact")
+    edit_git_project("compactproj")
+    vim.cmd("MentorChat")
+    local call = { name = "read_file", arguments = { path = "main.lua" } }
+    fake.script({
+      { content = "", tool_calls = { call, call } },
+      { content = "Looking closer.", tool_calls = { call } },
+      { content = "the answer" },
+    })
+    chat.ask("what does main.lua do?")
+    wait_until(function()
+      return chat.active_count() == 0 and chat.queued_count() == 0
+    end)
+    local function reply_lines()
+      local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+      for i, line in ipairs(lines) do
+        if line == "> what does main.lua do?" then
+          return vim.list_slice(lines, i + 1, i + 7)
+        end
+      end
+      return {}
+    end
+    local expected = {
+      "",
+      "⌁ read_file main.lua",
+      "⌁ read_file main.lua",
+      "Looking closer.",
+      "⌁ read_file main.lua",
+      "the answer",
+    }
+    H.eq(vim.list_slice(reply_lines(), 1, 6), expected, "live layout")
+
+    local buf = vim.api.nvim_get_current_buf()
+    chat.reset()
+    vim.api.nvim_buf_delete(buf, { force = true })
+    vim.cmd("MentorChat")
+    local replayed = reply_lines()
+    H.eq(vim.list_slice(replayed, 1, 6), expected, "replayed layout matches")
+    H.eq(replayed[7], "", "one blank line closes the reply")
+  end)
+
   H.test("each project gets its own chat and keeps its binding", function()
     configure("binding")
     local dir_a = edit_git_project("proj-a")

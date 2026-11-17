@@ -159,10 +159,24 @@ local function append_lines(buf, lines)
   vim.api.nvim_buf_set_lines(buf, #last, #last, false, lines)
 end
 
----Render one persisted transcript row into display lines.
+---Activity line for a tool call, shared by streaming and replay so a
+---reopened transcript looks the way it did live.
+---@param name string
+---@param args table|nil
+local function tool_line(name, args)
+  local line = "⌁ " .. name
+  if type(args) == "table" and type(args.path) == "string" then
+    line = line .. " " .. args.path
+  end
+  return line
+end
+
+---Render one persisted transcript row into display lines. A reply spans
+---several rows (assistant text, tool calls, tool results); like the live
+---view, it renders as one compact block: text, then one activity line per
+---tool call, and nothing for the results themselves.
 ---@param row table
----@param tool_names table<string, string> call id -> tool name
-local function render_row(row, tool_names)
+local function render_row(row)
   if row.role == "user" then
     local out = {}
     for _, line in ipairs(vim.split(row.content, "\n", { plain = true })) do
@@ -171,23 +185,21 @@ local function render_row(row, tool_names)
     return out
   end
   if row.role == "assistant" then
-    local out = align_tables(vim.split(row.content, "\n", { plain = true }))
-    local calls = row.tool_calls and (pcall(vim.json.decode, row.tool_calls))
-    if type(calls) == "table" then
+    local out = {}
+    local content = (row.content or ""):gsub("^%s*\n", ""):gsub("%s+$", "")
+    if content ~= "" then
+      out = align_tables(vim.split(content, "\n", { plain = true }))
+    end
+    local ok, calls = false, nil
+    if row.tool_calls then
+      ok, calls = pcall(vim.json.decode, row.tool_calls)
+    end
+    if ok and type(calls) == "table" then
       for _, call in ipairs(calls) do
-        tool_names[call.id] = call.name
-        out[#out + 1] = "⌁ called " .. call.name
+        out[#out + 1] = tool_line(call.name or "tool", call.arguments)
       end
     end
     return out
-  end
-  if row.role == "tool" then
-    local name = row.tool or tool_names[row.tool_call_id] or "tool"
-    local note = "⌁ " .. name .. " result"
-    if row.source and row.source:sub(1, 13) ~= "mentor-paths:" then
-      note = note .. " (" .. row.source .. ")"
-    end
-    return { note }
   end
   return {}
 end
@@ -364,17 +376,21 @@ function M.buffer_for(proj)
   if fresh then
     local lines = header_lines()
     local rows = records.conversations.load(project_row_id(proj), "coach")
-    local tool_names = {}
     local user_spans = {}
-    for _, row in ipairs(rows) do
-      local rendered = render_row(row, tool_names)
+    for i, row in ipairs(rows) do
+      local rendered = render_row(row)
       if row.role == "user" then
         user_spans[#user_spans + 1] = { #lines, rendered }
       end
       for _, line in ipairs(rendered) do
         lines[#lines + 1] = line
       end
-      lines[#lines + 1] = ""
+      -- One blank line after a user turn and after a whole reply (all rows
+      -- up to the next user turn), none between the rows of one reply.
+      local next_row = rows[i + 1]
+      if row.role == "user" or not next_row or next_row.role == "user" then
+        lines[#lines + 1] = ""
+      end
     end
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     vim.api.nvim_buf_clear_namespace(buf, sent_ns, 0, -1)
@@ -588,11 +604,7 @@ local function pump_queue()
       if phase ~= "done" then
         return
       end
-      local line = "⌁ " .. call.name
-      if call.arguments and call.arguments.path then
-        line = line .. " " .. call.arguments.path
-      end
-      note(line)
+      note(tool_line(call.name, call.arguments))
     end,
     on_note = function(text)
       note("⌁ " .. text)
@@ -703,7 +715,7 @@ function M.ask(text)
   local queued = active_op ~= nil
   local last = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local start = #last
-  local user_lines = render_row({ role = "user", content = clean }, {})
+  local user_lines = render_row({ role = "user", content = clean })
   local written = vim.list_extend(vim.list_extend({}, user_lines), { "" })
   vim.api.nvim_buf_set_lines(buf, start, start, false, written)
   mark_sent(buf, start, user_lines)
